@@ -8,6 +8,7 @@ import io
 import xml.etree.ElementTree as ET
 import pandas as pd
 import json
+import re  # 新增：用于处理 Windows 文件名非法字符
 
 # ==========================================
 # 1. 配置区与历史记录系统
@@ -20,7 +21,6 @@ HISTORY_FILE = "download_history.json"
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-# 初始化/加载历史记录账本
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
@@ -48,8 +48,20 @@ def search_pmc_oa(query, max_results=5):
         st.error(f"检索出错: {e}")
         return []
 
-def download_pdf(pmcid):
-    file_path = os.path.join(DOWNLOAD_DIR, f"PMC{pmcid}.pdf")
+def sanitize_filename(text):
+    """【核心工具】清洗文件名，去除 Windows 不允许的特殊字符，将空格转为下划线"""
+    # 替换 Windows 文件名非法字符为空，替换空格为下划线
+    clean_text = re.sub(r'[\\/*?:"<>|]', "", text)
+    return clean_text.replace(" ", "_")
+
+def download_pdf(pmcid, query):
+    """修改版：接受 query 参数，用于拼接文件名"""
+    safe_query = sanitize_filename(query)
+    # 新的文件命名格式：关键词_PMC编号.pdf
+    file_name = f"{safe_query}_PMC{pmcid}.pdf"
+    file_path = os.path.join(DOWNLOAD_DIR, file_name)
+    
+    # 注意：这里我们通过历史账本查重，所以不用担心不同关键词搜到同一篇文章重复下载
     api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=PMC{pmcid}"
     
     try:
@@ -90,10 +102,9 @@ def download_pdf(pmcid):
 # ==========================================
 st.set_page_config(page_title="文献智能拉取终端", layout="centered", page_icon="🧬")
 
-st.title("🧬 AI 智能文献拉取终端 (增量更新版)")
-st.markdown("自动过滤历史已处理文献，专为持续追踪最新学术动态设计。")
+st.title("🧬 AI 智能文献拉取终端 (前缀命名版)")
+st.markdown("文献将以 `搜索关键词_PMC编号.pdf` 的格式保存，方便本地资料库归档。")
 
-# 加载历史记录
 history = load_history()
 
 with st.sidebar:
@@ -124,11 +135,10 @@ if st.button("🚀 开始增量更新", type="primary"):
         if not all_pmc_ids:
             st.info("没有找到相关公开文献。")
         else:
-            # 核心逻辑：剔除已经在账本里的 ID，只保留全新的文献
             new_pmc_ids = [pid for pid in all_pmc_ids if pid not in history]
             skipped_count = len(all_pmc_ids) - len(new_pmc_ids)
             
-            st.info(f"📊 检索到 {len(all_pmc_ids)} 篇文献。已自动跳过 {skipped_count} 篇历史处理过的文献，本次需新抓取 **{len(new_pmc_ids)}** 篇。")
+            st.info(f"📊 检索到 {len(all_pmc_ids)} 篇文献。已跳过 {skipped_count} 篇历史记录，本次需新抓取 **{len(new_pmc_ids)}** 篇。")
             
             if len(new_pmc_ids) == 0:
                 st.success("🎉 当前资料库已经是最新状态，无需抓取！")
@@ -138,24 +148,26 @@ if st.button("🚀 开始增量更新", type="primary"):
                 success_count = 0
                 report_data = []
                 
+                safe_query = sanitize_filename(query)
+                
                 for i, pmcid in enumerate(new_pmc_ids):
-                    status_text.text(f"正在拉取新文献: PMC{pmcid} ({i+1}/{len(new_pmc_ids)})")
+                    status_text.text(f"正在拉取新文献: {safe_query}_PMC{pmcid}.pdf ({i+1}/{len(new_pmc_ids)})")
                     
-                    result = download_pdf(pmcid)
+                    # 传入 query 用于命名
+                    result = download_pdf(pmcid, query)
                     
-                    # 将结果写进内存账本，并立刻保存到本地 json
                     history[pmcid] = result
                     save_history(history)
                     
                     report_data.append({
-                        "文献编号": f"PMC{pmcid}",
+                        "本地文件名": f"{safe_query}_PMC{pmcid}.pdf" if result == "下载成功" else f"PMC{pmcid} (未下载)",
                         "抓取状态": result,
                         "直达链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
                     })
                     
                     if result == "下载成功":
                         success_count += 1
-                        st.success(f"✅ PMC{pmcid}.pdf - 新增入库")
+                        st.success(f"✅ {safe_query}_PMC{pmcid}.pdf - 新增入库")
                     else:
                         st.warning(f"⚠️ PMC{pmcid} - {result}")
                     
@@ -164,7 +176,6 @@ if st.button("🚀 开始增量更新", type="primary"):
                 
                 status_text.text("增量抓取完成！")
                 
-                # 展示本次新增的明细表
                 st.markdown("### 📈 本次新增文献明细")
                 df = pd.DataFrame(report_data)
                 st.dataframe(
@@ -195,7 +206,7 @@ if current_files:
     st.download_button(
         label="📦 一键打包提取全部 PDF (ZIP)",
         data=zip_buffer.getvalue(),
-        file_name=f"{query.replace(' ', '_')}_Papers.zip",
+        file_name=f"{sanitize_filename(query)}_Papers.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True
