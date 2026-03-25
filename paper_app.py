@@ -5,11 +5,12 @@ from Bio import Entrez
 import time
 import zipfile
 import io
+import xml.etree.ElementTree as ET
 
 # ==========================================
 # 1. 配置区
 # ==========================================
-Entrez.email = "your_email@example.com" # 建议换成你的邮箱
+Entrez.email = "your_email@example.com" # 部署前建议换成你的邮箱
 
 DOWNLOAD_DIR = "PDF_Downloads"
 if not os.path.exists(DOWNLOAD_DIR):
@@ -31,58 +32,57 @@ def search_pmc_oa(query, max_results=5):
         return []
 
 def download_pdf(pmcid):
-    """【双节点容灾下载引擎】: 欧洲节点与美国节点自动切换"""
+    """【官方 API 引擎】: 通过 NCBI OA Web Service 获取官方底层下载链接"""
     file_path = os.path.join(DOWNLOAD_DIR, f"PMC{pmcid}.pdf")
     
     if os.path.exists(file_path):
         return "已存在"
 
-    # 终极伪装头 (模拟真实的 Mac Chrome 浏览器行为)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive"
-    }
-
-    # ==============================
-    # 路线 A：Europe PMC 节点
-    # 注意：去掉了 verify=False，云端环境自带合法证书，去掉防拦截
-    # ==============================
-    url_europe = f"https://europepmc.org/articles/PMC{pmcid}?pdf=render"
+    # 1. 向官方 API 请求该文献的下载清单 (返回 XML)
+    api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=PMC{pmcid}"
     try:
-        res_eu = requests.get(url_europe, headers=headers, timeout=15, allow_redirects=True)
-        if res_eu.status_code == 200 and res_eu.content.startswith(b"%PDF"):
-            with open(file_path, "wb") as f:
-                f.write(res_eu.content)
-            return "下载成功 (Europe PMC 节点)"
-    except Exception:
-        pass # 如果被防火墙切断连接，默默忽略，直接进入路线 B
-
-    # ==============================
-    # 路线 B：美国 NCBI 官方直连节点
-    # 作为备用路线兜底
-    # ==============================
-    url_ncbi = f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/pdf/"
-    try:
-        res_ncbi = requests.get(url_ncbi, headers=headers, timeout=15, allow_redirects=True)
-        if res_ncbi.status_code == 200 and res_ncbi.content.startswith(b"%PDF"):
-            with open(file_path, "wb") as f:
-                f.write(res_ncbi.content)
-            return "下载成功 (NCBI 节点)"
-    except Exception as e:
-        # 如果双节点全被机房防火墙盾拦截，才返回错误
-        return f"网络报错: {type(e).__name__} (云端 IP 被数据库安全盾拦截)"
+        res_xml = requests.get(api_url, timeout=15)
+        if res_xml.status_code != 200:
+            return "官方 API 拒绝响应"
         
-    return "下载失败 (被拦截或文献本身未提供纯PDF)"
+        # 2. 解析 XML，寻找 PDF 格式的官方底层下载地址
+        root = ET.fromstring(res_xml.content)
+        pdf_link = None
+        for link in root.findall(".//link"):
+            if link.attrib.get("format") == "pdf":
+                pdf_link = link.attrib.get("href")
+                break
+        
+        if not pdf_link:
+            return "官方未提供独立PDF版 (该文献可能只有网页版)"
+            
+        # 3. NCBI 默认提供 ftp:// 链接，云端为保证稳定，将其转换为 https://
+        if pdf_link.startswith("ftp://ftp.ncbi.nlm.nih.gov"):
+            pdf_link = pdf_link.replace("ftp://ftp.ncbi.nlm.nih.gov", "https://ftp.ncbi.nlm.nih.gov")
+            
+        # 4. 根据官方底层直链进行无阻碍下载
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res_pdf = requests.get(pdf_link, headers=headers, timeout=30)
+        
+        if res_pdf.status_code == 200 and res_pdf.content.startswith(b"%PDF"):
+            with open(file_path, "wb") as f:
+                f.write(res_pdf.content)
+            return "下载成功 (官方底层接口)"
+        else:
+            return "下载失败 (获取到了链接，但文件拉取异常)"
+            
+    except ET.ParseError:
+        return "官方 API 返回数据解析失败"
+    except Exception as e:
+        return f"网络报错: {type(e).__name__}"
 
 # ==========================================
 # 3. 前端网页界面
 # ==========================================
 st.set_page_config(page_title="CD3双抗 智能检索终端", layout="centered", page_icon="🧬")
 
-st.title("🧬 AI 智能文献下载终端 (双节点容灾版)")
-st.markdown("部署于海外云端，自动在欧美学术节点间切换，智能规避反爬虫防火墙。")
+st.title("🧬 AI 智能文献下载终端 (官方接口版)")
+st.markdown("调用 NCBI 官方 OA 开发者接口，彻底绕过网页端验证码拦截。")
 
 # --- 侧边栏：缓存管理 ---
 with st.sidebar:
@@ -105,13 +105,13 @@ if st.button("🚀 开始云端极速抓取", type="primary"):
     if not query:
         st.warning("请输入关键词")
     else:
-        with st.spinner("正在连接 NCBI 数据库进行高速检索..."):
+        with st.spinner("正在连接 NCBI 数据库进行检索..."):
             pmc_ids = search_pmc_oa(query, max_results)
         
         if not pmc_ids:
             st.info("没有找到符合条件的公开文献。")
         else:
-            st.write(f"锁定 {len(pmc_ids)} 篇文献，启动双节点下载引擎：")
+            st.write(f"锁定 {len(pmc_ids)} 篇文献，启动官方接口下载：")
             
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -120,10 +120,8 @@ if st.button("🚀 开始云端极速抓取", type="primary"):
             for i, pmcid in enumerate(pmc_ids):
                 status_text.text(f"正在拉取: PMC{pmcid} ({i+1}/{len(pmc_ids)})")
                 
-                # 开始下载
                 result = download_pdf(pmcid)
                 
-                # 结果展示
                 if "成功" in result:
                     st.success(f"✅ PMC{pmcid}.pdf - {result}")
                     success_count += 1
@@ -132,7 +130,8 @@ if st.button("🚀 开始云端极速抓取", type="primary"):
                 else:
                     st.warning(f"⚠️ PMC{pmcid}.pdf - {result}")
                 
-                time.sleep(0.5) 
+                # 官方 API 要求请求间隔不要太短，设置1秒延迟非常安全
+                time.sleep(1) 
                 progress_bar.progress((i + 1) / len(pmc_ids))
             
             status_text.text("云端抓取任务完成！")
