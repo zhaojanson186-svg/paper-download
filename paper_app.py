@@ -3,18 +3,13 @@ import os
 import requests
 from Bio import Entrez
 import time
-import urllib3
 import zipfile
 import io
-import shutil
-
-# 屏蔽安全警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
 # 1. 配置区
 # ==========================================
-Entrez.email = "your_email@example.com" # 部署前建议换成你的邮箱
+Entrez.email = "your_email@example.com" # 建议换成你的邮箱
 
 DOWNLOAD_DIR = "PDF_Downloads"
 if not os.path.exists(DOWNLOAD_DIR):
@@ -36,36 +31,58 @@ def search_pmc_oa(query, max_results=5):
         return []
 
 def download_pdf(pmcid):
-    """云端极速直连下载"""
-    pdf_url = f"https://europepmc.org/articles/PMC{pmcid}?pdf=render"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/pdf"
-    }
+    """【双节点容灾下载引擎】: 欧洲节点与美国节点自动切换"""
     file_path = os.path.join(DOWNLOAD_DIR, f"PMC{pmcid}.pdf")
     
     if os.path.exists(file_path):
         return "已存在"
 
+    # 终极伪装头 (模拟真实的 Mac Chrome 浏览器行为)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive"
+    }
+
+    # ==============================
+    # 路线 A：Europe PMC 节点
+    # 注意：去掉了 verify=False，云端环境自带合法证书，去掉防拦截
+    # ==============================
+    url_europe = f"https://europepmc.org/articles/PMC{pmcid}?pdf=render"
     try:
-        # 云端环境直接拉取，极其稳定
-        res = requests.get(pdf_url, headers=headers, allow_redirects=True, timeout=20, verify=False)
-        if res.status_code == 200 and res.content.startswith(b"%PDF"):
+        res_eu = requests.get(url_europe, headers=headers, timeout=15, allow_redirects=True)
+        if res_eu.status_code == 200 and res_eu.content.startswith(b"%PDF"):
             with open(file_path, "wb") as f:
-                f.write(res.content)
-            return "下载成功"
-        else:
-            return f"下载失败 (状态码: {res.status_code})"
+                f.write(res_eu.content)
+            return "下载成功 (Europe PMC 节点)"
+    except Exception:
+        pass # 如果被防火墙切断连接，默默忽略，直接进入路线 B
+
+    # ==============================
+    # 路线 B：美国 NCBI 官方直连节点
+    # 作为备用路线兜底
+    # ==============================
+    url_ncbi = f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/pdf/"
+    try:
+        res_ncbi = requests.get(url_ncbi, headers=headers, timeout=15, allow_redirects=True)
+        if res_ncbi.status_code == 200 and res_ncbi.content.startswith(b"%PDF"):
+            with open(file_path, "wb") as f:
+                f.write(res_ncbi.content)
+            return "下载成功 (NCBI 节点)"
     except Exception as e:
-        return f"网络报错: {type(e).__name__}"
+        # 如果双节点全被机房防火墙盾拦截，才返回错误
+        return f"网络报错: {type(e).__name__} (云端 IP 被数据库安全盾拦截)"
+        
+    return "下载失败 (被拦截或文献本身未提供纯PDF)"
 
 # ==========================================
 # 3. 前端网页界面
 # ==========================================
 st.set_page_config(page_title="CD3双抗 智能检索终端", layout="centered", page_icon="🧬")
 
-st.title("🧬 AI 智能文献下载终端 (云端极速版)")
-st.markdown("通过海外云端节点直接拉取 Open Access 原文，彻底告别本地网络限制。")
+st.title("🧬 AI 智能文献下载终端 (双节点容灾版)")
+st.markdown("部署于海外云端，自动在欧美学术节点间切换，智能规避反爬虫防火墙。")
 
 # --- 侧边栏：缓存管理 ---
 with st.sidebar:
@@ -94,7 +111,7 @@ if st.button("🚀 开始云端极速抓取", type="primary"):
         if not pmc_ids:
             st.info("没有找到符合条件的公开文献。")
         else:
-            st.write(f"锁定 {len(pmc_ids)} 篇文献，启动云端下载引擎：")
+            st.write(f"锁定 {len(pmc_ids)} 篇文献，启动双节点下载引擎：")
             
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -102,8 +119,11 @@ if st.button("🚀 开始云端极速抓取", type="primary"):
             
             for i, pmcid in enumerate(pmc_ids):
                 status_text.text(f"正在拉取: PMC{pmcid} ({i+1}/{len(pmc_ids)})")
+                
+                # 开始下载
                 result = download_pdf(pmcid)
                 
+                # 结果展示
                 if "成功" in result:
                     st.success(f"✅ PMC{pmcid}.pdf - {result}")
                     success_count += 1
@@ -112,14 +132,14 @@ if st.button("🚀 开始云端极速抓取", type="primary"):
                 else:
                     st.warning(f"⚠️ PMC{pmcid}.pdf - {result}")
                 
-                time.sleep(0.5) # 云端可以缩短延迟时间
+                time.sleep(0.5) 
                 progress_bar.progress((i + 1) / len(pmc_ids))
             
             status_text.text("云端抓取任务完成！")
             st.write(f"**总结**: 本次成功拉取 {success_count} 篇 PDF 到云端服务器。")
 
 # ==========================================
-# 4. 一键打包下载功能
+# 4. 一键打包提取功能
 # ==========================================
 st.markdown("---")
 current_files = [f for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.pdf')]
