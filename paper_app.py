@@ -3,21 +3,17 @@ import os
 import requests
 from Bio import Entrez
 import time
-import zipfile
-import io
 import xml.etree.ElementTree as ET
 import pandas as pd
 import json
-import re
 import urllib.parse
 
 # Google Drive 官方库
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError
 
-# 新增：Google 大模型 AI 库
+# Google 大模型 AI 库
 import google.generativeai as genai
 
 # ==========================================
@@ -44,47 +40,74 @@ def save_history(history):
         json.dump(history, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 2. AI 提纯引擎 (大模型介入)
+# 2. AI 提纯双引擎 (完全避开网页Bug的安全版)
 # ==========================================
 def init_ai_model():
-    """初始化大模型"""
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
-        # 使用 Flash 模型：速度极快，极其适合批量提纯数据
         model = genai.GenerativeModel('gemini-1.5-flash')
         return model
-    except Exception as e:
+    except Exception:
         return None
 
-def analyze_abstract_with_ai(model, abstract_text):
-    """让 AI 像研发总监一样阅读摘要并提取结构化情报"""
+def analyze_paper_with_ai(model, abstract_text):
+    if not model or not abstract_text or len(abstract_text) < 20:
+        return {"靶点组合": "未提取", "实验模型": "未提取", "AI核心结论": "无有效摘要"}
+    
+    prompt = f"""
+    作为资深抗体药物研发专家，请阅读以下学术文献摘要，提取关键科研情报。
+    请直接输出一个合法的 JSON 格式，严格包含以下 3 个键名，绝对不要输出 markdown 代码块标记：
+    {{
+        "靶点组合": "提取文献研究的靶点(如 CD3, BCMA等)，若无则写'未提及'",
+        "实验模型": "提取研究使用的模型(如 细胞系、小鼠模型、临床I期等)，若无则写'未提及'",
+        "AI核心结论": "用15个字以内的中文高度概括其核心药效、安全性或主要发现"
+    }}
+    摘要原文：
+    {abstract_text}
+    """
+    try:
+        res = model.generate_content(prompt).text.strip()
+        # 【核心修复】：放弃正则表达式，改用最安全的字符串替换，防止网页解析崩溃
+        res = res.replace("```json", "").replace("```", "").strip()
+        data = json.loads(res)
+        return {
+            "靶点组合": data.get("靶点组合", "未提取"),
+            "实验模型": data.get("实验模型", "未提取"),
+            "AI核心结论": data.get("AI核心结论", "未提取")
+        }
+    except Exception as e:
+        err = "请求过快被限流" if "429" in str(e) else "解析报错"
+        return {"靶点组合": err, "实验模型": err, "AI核心结论": err}
+
+def analyze_patent_with_ai(model, abstract_text):
     if not model or not abstract_text or len(abstract_text) < 20:
         return {"靶点组合": "未提取", "抗体构型": "未提取", "AI一句话总结": "无有效摘要"}
     
     prompt = f"""
     作为资深抗体药物研发专家，请阅读以下专利摘要，提取关键商业与技术情报。
-    请直接输出一个合法的 JSON 格式，严格包含以下 3 个键名，不要有任何 Markdown 标记或多余解释：
+    请直接输出一个合法的 JSON 格式，严格包含以下 3 个键名，绝对不要输出 markdown 代码块标记：
     {{
         "靶点组合": "提取提到的所有靶点(如 CD3, BCMA, HER2等)，若无则写'未提及'",
-        "抗体构型": "提取抗体类型或技术平台(如 scFv, VHH, Bispecific, ADC, CAR-T等)，若无则写'未提及'",
+        "抗体构型": "提取抗体类型或技术平台(如 scFv, VHH, Bispecific, ADC等)，若无则写'未提及'",
         "AI一句话总结": "用15个字以内的中文高度概括其核心适应症或创新点"
     }}
-    
     摘要原文：
     {abstract_text}
     """
-    
     try:
-        # 强制 AI 以 JSON 格式响应，保证数据结构极度整洁
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(response_mime_type="application/json")
-        )
-        result = json.loads(response.text)
-        return result
+        res = model.generate_content(prompt).text.strip()
+        # 【核心修复】：同样使用安全的字符串替换
+        res = res.replace("```json", "").replace("```", "").strip()
+        data = json.loads(res)
+        return {
+            "靶点组合": data.get("靶点组合", "未提取"),
+            "抗体构型": data.get("抗体构型", "未提取"),
+            "AI一句话总结": data.get("AI一句话总结", "未提取")
+        }
     except Exception as e:
-        return {"靶点组合": "AI解析失败", "抗体构型": "AI解析失败", "AI一句话总结": "AI解析失败"}
+        err = "请求过快被限流" if "429" in str(e) else "解析报错"
+        return {"靶点组合": err, "抗体构型": err, "AI一句话总结": err}
 
 # ==========================================
 # 3. Google Drive 上传引擎
@@ -94,8 +117,7 @@ def get_gdrive_service():
         raw_token = st.secrets["GCP_TOKEN"]
         token_dict = json.loads(raw_token, strict=False)
         creds = Credentials.from_authorized_user_info(token_dict)
-        drive_service = build('drive', 'v3', credentials=creds)
-        return drive_service, None
+        return build('drive', 'v3', credentials=creds), None
     except Exception as e:
         return None, f"Token解析失败: {str(e)}"
 
@@ -109,21 +131,25 @@ def upload_to_gdrive(drive_service, local_file_path, file_name, folder_id, mime_
         return False, f"上传异常: {str(e)[:50]}"
 
 # ==========================================
-# 4. 核心抓取逻辑：文献 + Google Patents
+# 4. 核心抓取逻辑：文献提取 + 专利抓取
 # ==========================================
 def sanitize_filename(text):
+    import re
     clean_text = re.sub(r'[\\/*?:"<>|]', "", text)
     return clean_text.replace(" ", "_")
 
-def search_pmc_oa(query, max_results=5):
-    oa_query = f"({query}) AND open access[filter]"
+def fetch_pmc_metadata(pmcid):
     try:
-        handle = Entrez.esearch(db="pmc", term=oa_query, retmax=max_results, sort="date")
-        record = Entrez.read(handle)
-        handle.close()
-        return record["IdList"] 
-    except Exception as e:
-        return []
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmcid}&retmode=xml"
+        res = requests.get(url, timeout=15)
+        root = ET.fromstring(res.content)
+        title_node = root.find(".//article-title")
+        title = "".join(title_node.itertext()) if title_node is not None else f"PMC{pmcid}"
+        abstract_node = root.find(".//abstract")
+        abstract = "".join(abstract_node.itertext()) if abstract_node is not None else "无摘要"
+        return title, abstract
+    except Exception:
+        return f"PMC{pmcid}", "摘要获取失败"
 
 def download_pdf(pmcid, query):
     safe_query = sanitize_filename(query)
@@ -142,35 +168,41 @@ def download_pdf(pmcid, query):
         if not pdf_link: return "无官方纯PDF", None, None
         if pdf_link.startswith("ftp://"):
             pdf_link = pdf_link.replace("ftp://", "https://")
+        
         headers = {"User-Agent": "Mozilla/5.0"}
         res_pdf = requests.get(pdf_link, headers=headers, timeout=30)
         if res_pdf.status_code == 200 and res_pdf.content.startswith(b"%PDF"):
             with open(file_path, "wb") as f:
                 f.write(res_pdf.content)
             return "下载成功", file_path, file_name
-        else:
-            return "文件异常", None, None
+        return "文件异常", None, None
     except Exception:
         return "网络异常", None, None
 
+def search_pmc_oa(query, max_results=5):
+    oa_query = f"({query}) AND open access[filter]"
+    try:
+        handle = Entrez.esearch(db="pmc", term=oa_query, retmax=max_results, sort="date")
+        record = Entrez.read(handle)
+        handle.close()
+        return record["IdList"] 
+    except Exception:
+        return []
+
 def search_google_patents(query, max_results=50):
+    import re
     base_url = "https://patents.google.com/xhr/query?url="
     q_params = f"q={query}&num={max_results}"
     encoded_q = urllib.parse.quote(q_params)
     full_url = base_url + encoded_q
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json"
-    }
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     try:
         res = requests.get(full_url, headers=headers, timeout=20)
         if res.status_code == 200:
-            data = res.json()
-            clusters = data.get("results", {}).get("cluster", [])
+            clusters = res.json().get("results", {}).get("cluster", [])
             if not clusters: return []
-            raw_patents = clusters[0].get("result", [])
             parsed_patents = []
-            for item in raw_patents:
+            for item in clusters[0].get("result", []):
                 p = item.get("patent", {})
                 if not p: continue
                 p_num = p.get("publication_number", "无编号")
@@ -187,8 +219,7 @@ def search_google_patents(query, max_results=50):
                     elif isinstance(inventors, list): org_str = "、".join([str(a) for a in inventors])
                     else: org_str = "未公开"
                 
-                snippet = p.get("snippet", "无摘要")
-                clean_snippet = re.sub(r'<[^>]+>', '', snippet)
+                clean_snippet = re.sub(r'<[^>]+>', '', p.get("snippet", "无摘要"))
                 pub_date = p.get("priority_date", p.get("filing_date", "未知"))
                 
                 parsed_patents.append({
@@ -200,20 +231,16 @@ def search_google_patents(query, max_results=50):
                     "直达阅读链接": f"https://patents.google.com/patent/{p_num}"
                 })
             return parsed_patents
-        else:
-            st.error(f"⚠️ 谷歌专利防爬墙拦截 (状态码 {res.status_code})")
-            return []
-    except Exception as e:
-        st.error(f"🚨 专利检索异常: {e}")
         return []
-
-# ==========================================
+    except Exception:
+        return []
+        # ==========================================
 # 5. 前端网页界面
 # ==========================================
-st.set_page_config(page_title="AI 情报提纯终端", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="双擎 AI 情报终端", layout="wide", page_icon="🧠")
 
-st.title("🧠 商业与学术 AI 情报提纯终端")
-st.markdown("集全自动抓取、LLM 智能提纯、去重与云端网盘直传于一体。")
+st.title("🧠 药物研发 AI 全景情报终端")
+st.markdown("文献精读与专利防线双向覆盖。自动抓取、LLM 智能提纯、去重并直传云盘。")
 
 history = load_history()
 
@@ -222,138 +249,160 @@ with st.sidebar:
     gdrive_folder_id = st.text_input("📁 Google Drive 文件夹 ID", placeholder="粘贴你的文件夹ID")
     st.markdown("---")
     
-    # 检查 AI 模型状态
     ai_model = init_ai_model()
     if ai_model:
-        st.success("🤖 AI 提纯引擎：已激活")
+        st.success("🤖 AI 双擎提纯：已激活")
     else:
-        st.error("🤖 AI 提纯引擎：离线 (请检查 GEMINI_API_KEY 配置)")
+        st.error("🤖 AI 双擎提纯：离线 (需配置 GEMINI_API_KEY)")
 
     st.markdown("---")
     st.write(f"📖 云端总账本记录数: **{len(history)}** 条")
-    if st.button("🗑️ 清空历史记录 (文献+专利)", type="secondary"):
+    if st.button("🗑️ 清空历史记录", type="secondary"):
         if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
         st.success("账本已彻底重置！")
         time.sleep(1)
         st.rerun()
 
-tab1, tab2 = st.tabs(["📄 核心文献全自动抓取", "💡 AI 专利情报雷达 (智能提纯)"])
+tab1, tab2 = st.tabs(["📄 核心文献直传 + AI 精读", "💡 专利雷达 + AI 构型拆解"])
 
+# ========================================================
+# 引擎 1：文献抓取 + AI 精读报表
+# ========================================================
 with tab1:
-    st.markdown("### 🧬 学术前沿直达")
+    st.markdown("### 🧬 学术前沿：抓取原文并生成 AI 精读报表")
     query_paper = st.text_input("输入检索关键词 (靶点/适应症)", value="CD3 bispecific antibody", key="q_paper")
     max_papers = st.number_input("本次请求最大篇数", min_value=1, max_value=500, value=15)
     
-    if st.button("🚀 开始极速抓取文献并上传", type="primary"):
+    if st.button("🚀 开始极速抓取并进行 AI 提纯", type="primary"):
         if not query_paper or not gdrive_folder_id:
             st.error("请确保已填写关键词和左侧的 Google Drive 文件夹 ID！")
+        elif not ai_model:
+            st.error("请先激活 AI 引擎才能生成精读报表！")
         else:
-            with st.spinner("正在初始化 Google Drive 授权通道..."):
-                drive_service, err_msg = get_gdrive_service()
+            with st.spinner("正在初始化网盘与文献数据库..."):
+                drive_service, _ = get_gdrive_service()
             if not drive_service:
-                st.error("网盘授权失败，请检查配置。")
+                st.error("网盘授权失败。")
             else:
-                with st.spinner("正在筛选新文献..."):
-                    all_pmc_ids = search_pmc_oa(query_paper, max_papers)
-                if not all_pmc_ids:
-                    st.info("没有找到相关公开文献。")
+                all_pmc_ids = search_pmc_oa(query_paper, max_papers)
+                new_pmc_ids = [pid for pid in all_pmc_ids if f"PMC_{pid}" not in history]
+                
+                if not new_pmc_ids:
+                    st.info("🔕 本次未发现新的开源文献。")
                 else:
-                    new_pmc_ids = [pid for pid in all_pmc_ids if pid not in history]
-                    st.info(f"📊 已跳过 {len(all_pmc_ids) - len(new_pmc_ids)} 篇历史记录，本次抓取 **{len(new_pmc_ids)}** 篇。")
-                    if len(new_pmc_ids) > 0:
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        report_data = []
-                        for i, pmcid in enumerate(new_pmc_ids):
-                            status_text.text(f"正在处理: PMC{pmcid} ({i+1}/{len(new_pmc_ids)})")
-                            status, local_path, file_name = download_pdf(pmcid, query_paper)
-                            upload_status = "未触发"
-                            if status == "下载成功":
-                                is_up, msg = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id)
-                                if is_up:
-                                    upload_status = "✅ 已保存到网盘"
-                                    os.remove(local_path)
-                                else:
-                                    upload_status = f"上传报错"
-                            history[pmcid] = status
-                            save_history(history)
-                            report_data.append({"文献编号": f"PMC{pmcid}", "状态": status, "网盘同步": upload_status})
-                            progress_bar.progress((i + 1) / len(new_pmc_ids))
-                        status_text.text("文献任务完成！")
-                        st.dataframe(pd.DataFrame(report_data), use_container_width=True)
+                    st.write(f"✅ 发现 **{len(new_pmc_ids)}** 篇新文献！正在下载 PDF 并调动 AI 阅读摘要...")
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    paper_report_data = []
+                    
+                    for i, pmcid in enumerate(new_pmc_ids):
+                        status_text.text(f"🤖 正在处理第 {i+1}/{len(new_pmc_ids)} 篇 (PMC{pmcid}): 下载原文 + AI 精读...")
+                        
+                        status, local_path, file_name = download_pdf(pmcid, query_paper)
+                        pdf_uploaded = "未上传"
+                        if status == "下载成功":
+                            is_up, _ = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id)
+                            pdf_uploaded = "✅ 原文已入库" if is_up else "❌ 上传失败"
+                            os.remove(local_path)
+                        
+                        title, abstract = fetch_pmc_metadata(pmcid)
+                        ai_insights = analyze_paper_with_ai(ai_model, abstract)
+                        
+                        paper_report_data.append({
+                            "文献编号": f"PMC{pmcid}",
+                            "🎯核心靶点": ai_insights.get("靶点组合", ""),
+                            "🐁实验模型": ai_insights.get("实验模型", ""),
+                            "💡核心结论": ai_insights.get("AI核心结论", ""),
+                            "原文状态": pdf_uploaded,
+                            "文献标题": title,
+                            "官方直达链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
+                        })
+                        
+                        history[f"PMC_{pmcid}"] = "✅ 已存PDF+已精读"
+                        save_history(history)
+                        
+                        time.sleep(4.5)
+                        progress_bar.progress((i + 1) / len(new_pmc_ids))
+                        
+                    status_text.text("🧠 所有文献下载及 AI 精读完毕！正在推送总报表...")
+                    
+                    df_papers = pd.DataFrame(paper_report_data)
+                    st.dataframe(
+                        df_papers, 
+                        column_config={"官方直达链接": st.column_config.LinkColumn("点击看网页原文")},
+                        use_container_width=True, hide_index=True
+                    )
+                    
+                    timestamp = time.strftime("%m%d_%H%M")
+                    safe_q = sanitize_filename(query_paper)
+                    csv_name = f"{safe_q}_Paper_AI_Report_{timestamp}.csv"
+                    csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
+                    df_papers.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                    
+                    is_up, _ = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
+                    if is_up:
+                        st.success(f"🎉 任务完美结束！原文 PDF 及《文献精读报表》已推送到你的 Google Drive！")
+                        os.remove(csv_path)
 
+# ========================================================
+# 引擎 2：专利情报抓取 + AI 深度提纯
+# ========================================================
 with tab2:
-    st.markdown("### 🧠 竞争对手挖掘与 AI 深度提纯")
-    st.info("系统提取底层商业情报后，将交由大模型逐一阅读晦涩的专利摘要，提炼出靶点、构型及一句话结论。")
-    
+    st.markdown("### 🧠 竞争对手挖掘：大模型提炼核心管线情报")
     query_patent = st.text_input("输入检索关键词 (如靶点、技术全称)", value="CD3 bispecific antibody", key="q_patent")
     max_patents = st.number_input("需梳理的专利数量", min_value=1, max_value=200, value=30)
     
-    if st.button("📊 生成【增量提纯】专利报表并推送", type="primary"):
+    if st.button("📊 生成【专利 AI 提纯】报表并推送", type="primary"):
         if not query_patent or not gdrive_folder_id:
             st.error("请确保已填写关键词和左侧的 Google Drive 文件夹 ID！")
         elif not ai_model:
-            st.error("AI 引擎未激活！请在 Secrets 中配置 GEMINI_API_KEY。")
+            st.error("AI 引擎未激活！请配置 API_KEY。")
         else:
-            with st.spinner("正在提取专利底层数据并比对历史账本..."):
-                drive_service, err_msg = get_gdrive_service()
+            with st.spinner("正在提取底层专利数据并比对账本..."):
+                drive_service, _ = get_gdrive_service()
                 if not drive_service:
                     st.error("网盘授权失败。")
                 else:
                     patents = search_google_patents(query_patent, max_patents)
-                    if not patents:
-                        st.warning("未能检索到相关专利。")
+                    new_patents = [pt for pt in patents if f"PAT_{pt['全球公开号']}" not in history]
+                    
+                    if not new_patents:
+                        st.info("🔕 扫描到的专利均已在历史账本中，无需重复提取！")
                     else:
-                        new_patents = [pt for pt in patents if f"PAT_{pt['全球公开号']}" not in history]
+                        st.write(f"✅ 发现 **{len(new_patents)}** 项新专利！大模型正在逐篇拆解抗体构型...")
                         
-                        if not new_patents:
-                            st.info(f"🔕 扫描到 {len(patents)} 项专利，但均已在历史账本中，无需重复提纯推送！")
-                        else:
-                            st.write(f"✅ 发现 **{len(new_patents)}** 项新专利！正在调动 AI 逐篇进行深度阅读提纯...")
+                        ai_progress = st.progress(0)
+                        ai_status = st.empty()
+                        
+                        for idx, pt in enumerate(new_patents):
+                            ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
+                            ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'])
                             
-                            ai_progress = st.progress(0)
-                            ai_status = st.empty()
+                            pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
+                            pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
+                            pt["💡商业一句话总结"] = ai_insights.get("AI一句话总结", "未提取")
                             
-                            # 🥇 核心突破：让大模型逐个阅读专利并注入灵魂
-                            for idx, pt in enumerate(new_patents):
-                                ai_status.text(f"🤖 AI 正在提纯第 {idx+1}/{len(new_patents)} 项专利: {pt['全球公开号']} ...")
-                                
-                                ai_insights = analyze_abstract_with_ai(ai_model, pt['核心摘要'])
-                                
-                                # 将 AI 提纯的结晶注入到这条数据的前排
-                                pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
-                                pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
-                                pt["💡AI一句话总结"] = ai_insights.get("AI一句话总结", "未提取")
-                                
-                                # 为防止触发免费 API 速率限制，温柔地停顿一下
-                                time.sleep(1.5)
-                                ai_progress.progress((idx + 1) / len(new_patents))
-                            
-                            ai_status.text("🧠 AI 提纯完毕！正在生成全景报表...")
-                            
-                            # 调整列的顺序，把 AI 的精华放在最前面醒目的位置
-                            cols_order = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡AI一句话总结", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
-                            df_patents = pd.DataFrame(new_patents)[cols_order]
-                            
-                            st.dataframe(
-                                df_patents, 
-                                column_config={"直达阅读链接": st.column_config.LinkColumn("点击查阅原文")},
-                                use_container_width=True, hide_index=True
-                            )
-                            
-                            timestamp = time.strftime("%m%d_%H%M")
-                            safe_q = sanitize_filename(query_patent)
-                            csv_name = f"{safe_q}_AI_Report_{timestamp}.csv"
-                            csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
-                            df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
-                            
-                            with st.spinner("正在将 AI 绝密提纯报表推送到云端硬盘..."):
-                                is_up, msg = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
-                                if is_up:
-                                    st.success(f"🎉 任务完美结束！带大模型提纯的 **{csv_name}** 已推送到你的 Google Drive！")
-                                    os.remove(csv_path)
-                                    for pt in new_patents:
-                                        history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
-                                    save_history(history)
-                                else:
-                                    st.error(f"报表上传失败: {msg}")
+                            time.sleep(4.5)
+                            ai_progress.progress((idx + 1) / len(new_patents))
+                        
+                        ai_status.text("🧠 提纯完毕！正在生成全景竞争报表...")
+                        
+                        cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡商业一句话总结", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
+                        df_patents = pd.DataFrame(new_patents)[cols]
+                        
+                        st.dataframe(df_patents, column_config={"直达阅读链接": st.column_config.LinkColumn("点击查阅原文")}, use_container_width=True, hide_index=True)
+                        
+                        timestamp = time.strftime("%m%d_%H%M")
+                        safe_q = sanitize_filename(query_patent)
+                        csv_name = f"{safe_q}_Patent_AI_Report_{timestamp}.csv"
+                        csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
+                        df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                        
+                        is_up, _ = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
+                        if is_up:
+                            st.success(f"🎉 任务完美结束！带有 AI 商业总结的报表已推送到网盘！")
+                            os.remove(csv_path)
+                            for pt in new_patents:
+                                history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
+                            save_history(history)
