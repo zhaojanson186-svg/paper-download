@@ -40,10 +40,9 @@ def save_history(history):
         json.dump(history, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 2. Google Drive 上传引擎 (共享底层)
+# 2. Google Drive 上传引擎
 # ==========================================
 def get_gdrive_service():
-    """读取云端的真人 Token 并建立连接"""
     try:
         raw_token = st.secrets["GCP_TOKEN"]
         token_dict = json.loads(raw_token, strict=False)
@@ -54,7 +53,6 @@ def get_gdrive_service():
         return None, f"Token解析失败: {str(e)}"
 
 def upload_to_gdrive(drive_service, local_file_path, file_name, folder_id, mime_type='application/pdf'):
-    """将文件推送到谷歌网盘 (支持 PDF 和 CSV)"""
     try:
         file_metadata = {'name': file_name, 'parents': [folder_id]}
         media = MediaFileUpload(local_file_path, mimetype=mime_type)
@@ -119,13 +117,16 @@ def download_pdf(pmcid, query):
     except Exception:
         return "网络异常", None, None
 
-# --- 专利模块 ---
+# --- 专利模块 (终极修复版) ---
 def search_uspto_patents(query, max_results=20):
-    """调用美国专利商标局(USPTO)开源 API，拉取核心情报"""
     url = "https://api.patentsview.org/patents/query"
+    # 核心修复：扩大搜索范围（标题+摘要），并使用官方严格要求的 assignee_organization 字段
     payload = {
-        "q": {"_text_any": {"patent_abstract": query}},
-        "f": ["patent_number", "patent_title", "patent_date", "patent_abstract", "assignees"],
+        "q": {"_or": [
+            {"_text_any": {"patent_abstract": query}},
+            {"_text_any": {"patent_title": query}}
+        ]},
+        "f": ["patent_number", "patent_title", "patent_date", "patent_abstract", "assignee_organization"],
         "o": {"per_page": max_results}
     }
     try:
@@ -133,9 +134,12 @@ def search_uspto_patents(query, max_results=20):
         if res.status_code == 200:
             data = res.json()
             return data.get("patents") or []
-        return []
+        else:
+            # 加上显微镜：如果专利局报错，直接把原话打印在网页上
+            st.error(f"⚠️ USPTO接口报错 (状态码 {res.status_code}): {res.text[:150]}")
+            return []
     except Exception as e:
-        st.error(f"USPTO API 连接异常: {e}")
+        st.error(f"🚨 专利检索连接异常: {e}")
         return []
 
 # ==========================================
@@ -230,8 +234,8 @@ with tab2:
     st.markdown("### 💡 技术壁垒梳理与竞争情报汇总")
     st.info("系统将检索美国专利数据库，自动生成 Excel 兼容的商业情报汇总表，并直接推送到网盘。")
     
-    query_patent = st.text_input("输入检索关键词 (如靶点、技术全称)", value="CD3 bispecific antibody", key="q_patent")
-    max_patents = st.number_input("需梳理的专利数量", min_value=1, max_value=200, value=30)
+    query_patent = st.text_input("输入检索关键词 (如靶点、技术全称)", value="CD3", key="q_patent")
+    max_patents = st.number_input("需梳理的专利数量", min_value=1, max_value=200, value=50)
     
     if st.button("📊 生成专利全景报表并推送网盘", type="primary"):
         if not query_patent or not gdrive_folder_id:
@@ -246,14 +250,12 @@ with tab2:
                     patents = search_uspto_patents(query_patent, max_patents)
                     
                     if not patents:
-                        st.warning("未能检索到相关专利，请尝试更换或缩短关键词。")
+                        st.warning("未能检索到相关专利，请尝试更换关键词。如果是 API 报错，请查看上方红色提示。")
                     else:
                         st.write(f"✅ 成功提取 **{len(patents)}** 项相关专利，正在生成报表...")
                         
-                        # 解析并组装核心情报数据
                         patent_report = []
                         for p in patents:
-                            # 提取申请公司名称
                             assignees = p.get("assignees", [])
                             orgs = [a.get("assignee_organization", "") for a in assignees if isinstance(a, dict) and a.get("assignee_organization")]
                             org_str = "、".join(orgs) if orgs else "未公开/个人"
@@ -269,7 +271,6 @@ with tab2:
                                 "直达阅读链接": f"https://patents.google.com/patent/US{p_num}"
                             })
                         
-                        # 转换为 DataFrame 并展示在网页上
                         df_patents = pd.DataFrame(patent_report)
                         st.dataframe(
                             df_patents, 
@@ -277,17 +278,15 @@ with tab2:
                             use_container_width=True, hide_index=True
                         )
                         
-                        # 保存为本地 CSV (加 utf-8-sig 确保 Excel 打开不乱码)
                         safe_q_patent = sanitize_filename(query_patent)
                         csv_name = f"{safe_q_patent}_Patent_Report.csv"
                         csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
                         df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
                         
-                        # 推送到 Google Drive
                         with st.spinner("正在将报表推送到云端硬盘..."):
                             is_up, msg = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
                             if is_up:
-                                st.success(f"🎉 任务完美结束！**{csv_name}** 报表已成功推送到你的 Google Drive。你可以直接用 Excel 打开进行筛选和分析。")
+                                st.success(f"🎉 任务完美结束！**{csv_name}** 报表已成功推送到你的 Google Drive。")
                                 os.remove(csv_path)
                             else:
                                 st.error(f"报表上传失败: {msg}")
