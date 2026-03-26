@@ -63,52 +63,68 @@ def search_pmc_oa(query, max_results=5):
     except Exception:
         return []
 
-def search_google_patents(query, max_results=50):
+import urllib.parse
+import re
+
+# 确保文件顶部有这个导入（如果之前没删的话）
+from utils_network import requests_get_with_retry
+from engine_ai import safe_truncate
+
+def search_europe_pmc_patents(query, max_results=30):
+    """调用欧洲 Europe PMC 官方接口提取生命科学专利，绝对免费且防拦截"""
     global _last_patent_fetch_debug
-    base_url = "https://patents.google.com/xhr/query?url="
-    encoded_q = urllib.parse.quote(f"q={query}&num={max_results}")
-    full_url = base_url + encoded_q
-    # engine_scraper.py 的 search_google_patents 函数内
+    
+    # 核心语法：强制限定检索来源为专利 (SRC:PAT)
+    epmc_query = f'({query}) AND SRC:PAT'
+    encoded_q = urllib.parse.quote(epmc_query)
+    
+    # Europe PMC 官方 REST API，返回干净的 JSON
+    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={encoded_q}&resultType=core&format=json&pageSize={max_results}"
+
+    _last_patent_fetch_debug = {"query": query, "url": url}
+
     headers = {
-        # 换成真实的 Windows 环境 Chrome UA，告别裸奔的 Mozilla/5.0
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://patents.google.com/",
+        # 友好的 UA，明确告诉欧洲局我们是学术型数据抓取
+        "User-Agent": "Mozilla/5.0 (Streamlit Antibody Research App)",
+        "Accept": "application/json"
     }
-    
-    _last_patent_fetch_debug = {"query": query, "max_results": max_results, "url": full_url}
-    
+
     try:
-        res = requests_get_with_retry(full_url, headers=headers, timeout=20, max_retries=4)
+        res = requests_get_with_retry(url, headers=headers, timeout=20, max_retries=3)
         _last_patent_fetch_debug["status_code"] = getattr(res, "status_code", None)
         _last_patent_fetch_debug["response_preview"] = safe_truncate(getattr(res, "text", ""), 300)
-        
-        if res.status_code != 200: return []
-        payload = res.json()
-        clusters = payload.get("results", {}).get("cluster", [])
-        if not clusters: return []
 
+        if res.status_code != 200:
+            return []
+
+        data = res.json()
+        results = data.get("resultList", {}).get("result", [])
+        
         parsed_patents = []
-        for item in clusters[0].get("result", []):
-            p = item.get("patent", {})
-            if not p: continue
+        for p in results:
+            # 获取专利号
+            p_num = p.get("id", "无编号")
             
-            p_num = p.get("publication_number", "无编号")
-            assignees = p.get("assignee", p.get("inventor", "未公开"))
-            org_str = "、".join([str(a) for a in assignees]) if isinstance(assignees, list) else str(assignees)
+            # Europe PMC 通常将专利申请人/发明人放在 authorString 字段
+            org_str = p.get("authorString", "未公开")
             
-            clean_snippet = re.sub(r"<[^>]+>", "", p.get("snippet", "无摘要"))
+            # 清洗摘要中的 HTML 标签和换行符，让大模型吃得更舒服
+            abstract = p.get("abstractText", "无摘要").replace("\n", " ")
+            clean_abstract = re.sub(r"<[^>]+>", "", abstract)
             
+            # 过滤掉真的没有摘要的垃圾专利，帮大模型省钱
+            if clean_abstract == "无摘要" or len(clean_abstract) < 20:
+                continue
+
             parsed_patents.append({
                 "全球公开号": p_num,
-                "优先权/申请日": p.get("priority_date", p.get("filing_date", "未知")),
+                "优先权/申请日": p.get("firstPublicationDate", p.get("pubYear", "未知")),
                 "申请公司 / 拥有者": org_str,
                 "专利名称": p.get("title", "未公开"),
-                "核心摘要": clean_snippet,
-                "直达阅读链接": f"https://patents.google.com/patent/{p_num}",
+                "核心摘要": clean_abstract[:1500],  # 截断超长摘要防爆 token
+                "直达阅读链接": f"https://europepmc.org/article/PAT/{p_num}"
             })
+            
         return parsed_patents
     except Exception as e:
         import traceback
