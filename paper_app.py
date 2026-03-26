@@ -6,7 +6,8 @@ import pandas as pd
 from config import HISTORY_FILE, DOWNLOAD_DIR, load_history, save_history, sanitize_filename
 from engine_ai import init_ai_model, list_available_gemini_models, analyze_paper_with_ai, analyze_patent_with_ai
 from engine_gdrive import get_gdrive_service, upload_to_gdrive
-from engine_scraper import search_pmc_oa, download_pdf, fetch_pmc_metadata, search_google_patents, get_last_patent_fetch_debug
+# 把原来的导入替换为：
+from engine_scraper import search_pmc_oa, download_pdf, fetch_pmc_metadata, search_europe_pmc_patents, get_last_patent_fetch_debug
 
 st.set_page_config(page_title="双擎 AI 情报终端", layout="wide", page_icon="🧠")
 
