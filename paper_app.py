@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import json
 import re
+import urllib.parse # 新增：用于解析谷歌的搜索链接
 
 # Google Drive 官方库
 from google.oauth2.credentials import Credentials
@@ -67,12 +68,13 @@ def upload_to_gdrive(drive_service, local_file_path, file_name, folder_id, mime_
         return False, f"上传异常: {str(e)[:50]}"
 
 # ==========================================
-# 3. 核心抓取逻辑：文献 + 专利
+# 3. 核心抓取逻辑：文献 + Google Patents
 # ==========================================
 def sanitize_filename(text):
     clean_text = re.sub(r'[\\/*?:"<>|]', "", text)
     return clean_text.replace(" ", "_")
 
+# --- 文献模块 ---
 def search_pmc_oa(query, max_results=5):
     oa_query = f"({query}) AND open access[filter]"
     try:
@@ -92,7 +94,6 @@ def download_pdf(pmcid, query):
     try:
         res_xml = requests.get(api_url, timeout=15)
         if res_xml.status_code != 200: return "API拒绝响应", None, None
-        
         root = ET.fromstring(res_xml.content)
         pdf_link = None
         for link in root.findall(".//link"):
@@ -100,11 +101,10 @@ def download_pdf(pmcid, query):
                 pdf_link = link.attrib.get("href")
                 break
         if not pdf_link: return "无官方纯PDF", None, None
-            
         if pdf_link.startswith("ftp://"):
             pdf_link = pdf_link.replace("ftp://", "https://")
             
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         res_pdf = requests.get(pdf_link, headers=headers, timeout=30)
         
         if res_pdf.status_code == 200 and res_pdf.content.startswith(b"%PDF"):
@@ -116,188 +116,32 @@ def download_pdf(pmcid, query):
     except Exception:
         return "网络异常", None, None
 
-def search_europepmc_patents(query, max_results=50):
-    url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-    params = {
-        "query": f'({query}) AND SRC:PAT',
-        "format": "json",
-        "resultType": "core",
-        "pageSize": max_results
+# --- 全新专利模块：直连 Google Patents 底层 XHR 接口 ---
+def search_google_patents(query, max_results=50):
+    """抓取 Google Patents 最纯正的商业情报"""
+    base_url = "https://patents.google.com/xhr/query?url="
+    # 模拟真实网页的请求参数
+    q_params = f"q={query}&num={max_results}"
+    encoded_q = urllib.parse.quote(q_params)
+    full_url = base_url + encoded_q
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
     }
+    
     try:
-        res = requests.get(url, params=params, timeout=20)
+        res = requests.get(full_url, headers=headers, timeout=20)
         if res.status_code == 200:
             data = res.json()
-            return data.get("resultList", {}).get("result", [])
-        else:
-            st.error(f"⚠️ 全球专利接口报错 (状态码 {res.status_code}): {res.text[:150]}")
-            return []
-    except Exception as e:
-        st.error(f"🚨 专利检索连接异常: {e}")
-        return []
-
-# ==========================================
-# 4. 前端网页界面
-# ==========================================
-st.set_page_config(page_title="商业与学术情报终端", layout="wide", page_icon="🌐")
-
-st.title("🌐 商业与学术全景情报终端")
-st.markdown("集开源文献直传与专利雷达于一体，您的云端科研助理。")
-
-history = load_history()
-
-with st.sidebar:
-    st.header("⚙️ 全局存储配置")
-    gdrive_folder_id = st.text_input("📁 Google Drive 文件夹 ID", placeholder="粘贴你的文件夹ID")
-    st.markdown("*(必填，PDF和报表将存入此文件夹)*")
-    
-    st.markdown("---")
-    st.write(f"📖 历史文献处理记录: **{len(history)}** 条")
-    if st.button("🗑️ 清空历史记录", type="secondary"):
-        if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
-        st.success("文献账本已重置！")
-        time.sleep(1)
-        st.rerun()
-
-tab1, tab2 = st.tabs(["📄 核心文献全自动抓取", "💡 全球抗体专利雷达 (EBI)"])
-
-with tab1:
-    st.markdown("### 🧬 学术前沿直达")
-    query_paper = st.text_input("输入检索关键词 (靶点/适应症)", value="CD3 bispecific antibody", key="q_paper")
-    max_papers = st.number_input("本次请求最大篇数", min_value=1, max_value=500, value=15)
-    
-    if st.button("🚀 开始极速抓取文献并上传", type="primary"):
-        if not query_paper or not gdrive_folder_id:
-            st.error("请确保已填写关键词和左侧的 Google Drive 文件夹 ID！")
-        else:
-            with st.spinner("正在初始化 Google Drive 授权通道..."):
-                drive_service, err_msg = get_gdrive_service()
+            clusters = data.get("results", {}).get("cluster", [])
+            if not clusters: return []
+            
+            raw_patents = clusters[0].get("result", [])
+            parsed_patents = []
+            
+            for item in raw_patents:
+                p = item.get("patent", {})
+                if not p: continue
                 
-            if not drive_service:
-                st.error("网盘授权失败，请检查配置。")
-            else:
-                with st.spinner("正在筛选新文献..."):
-                    all_pmc_ids = search_pmc_oa(query_paper, max_papers)
-                
-                if not all_pmc_ids:
-                    st.info("没有找到相关公开文献。")
-                else:
-                    new_pmc_ids = [pid for pid in all_pmc_ids if pid not in history]
-                    st.info(f"📊 已跳过 {len(all_pmc_ids) - len(new_pmc_ids)} 篇历史记录，本次抓取 **{len(new_pmc_ids)}** 篇。")
-                    
-                    if len(new_pmc_ids) > 0:
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        report_data = []
-                        
-                        for i, pmcid in enumerate(new_pmc_ids):
-                            status_text.text(f"正在处理: PMC{pmcid} ({i+1}/{len(new_pmc_ids)})")
-                            status, local_path, file_name = download_pdf(pmcid, query_paper)
-                            upload_status = "未触发"
-                            
-                            if status == "下载成功":
-                                is_up, msg = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id)
-                                if is_up:
-                                    upload_status = "✅ 已保存到网盘"
-                                    st.success(f"☁️ {file_name} -> {upload_status}")
-                                    os.remove(local_path)
-                                else:
-                                    upload_status = f"上传报错"
-                                    st.error(f"❌ {file_name} 上传失败: {msg}")
-                            else:
-                                st.warning(f"⚠️ PMC{pmcid} - {status}")
-
-                            history[pmcid] = status
-                            save_history(history)
-                            report_data.append({"文献编号": f"PMC{pmcid}", "状态": status, "网盘同步": upload_status})
-                            time.sleep(1) 
-                            progress_bar.progress((i + 1) / len(new_pmc_ids))
-                        
-                        status_text.text("文献任务完成！")
-                        st.dataframe(pd.DataFrame(report_data), use_container_width=True)
-
-with tab2:
-    st.markdown("### 💡 核心技术壁垒与竞争对手挖掘")
-    st.info("系统将检索全球生命科学专利库(包含美国、欧洲、WIPO)，生成 Excel 商业情报报表并推送网盘。")
-    
-    query_patent = st.text_input("输入检索关键词 (如靶点、技术全称)", value="CD3", key="q_patent")
-    max_patents = st.number_input("需梳理的专利数量", min_value=1, max_value=200, value=50)
-    
-    if st.button("📊 生成专利全景报表并推送网盘", type="primary"):
-        if not query_patent or not gdrive_folder_id:
-            st.error("请确保已填写关键词和左侧的 Google Drive 文件夹 ID！")
-        else:
-            with st.spinner("正在初始化网盘连接并查询全球专利数据..."):
-                drive_service, err_msg = get_gdrive_service()
-                
-                if not drive_service:
-                    st.error("网盘授权失败。")
-                else:
-                    patents = search_europepmc_patents(query_patent, max_patents)
-                    
-                    if not patents:
-                        st.warning("未能检索到相关专利，请尝试更换关键词。")
-                    else:
-                        st.write(f"✅ 成功跨国提取 **{len(patents)}** 项相关专利，正在生成精美报表...")
-                        
-                        patent_report = []
-                        for p in patents:
-                            p_num = p.get("id", "无编号")
-                            title = p.get("title", "未公开")
-                            pub_date = p.get("firstPublicationDate", "未知")
-                            abstract = p.get("abstractText", "无摘要")
-                            
-                            # --- 核心修复：多重降维暴力提取申请人/公司 ---
-                            org_str = ""
-                            
-                            # 1. 尝试找专属 assignee 字段
-                            if "patentDetails" in p and "assigneeList" in p["patentDetails"]:
-                                assignee_data = p["patentDetails"]["assigneeList"].get("assignee", [])
-                                if isinstance(assignee_data, list):
-                                    org_str = "、".join([str(a) for a in assignee_data])
-                                elif isinstance(assignee_data, str):
-                                    org_str = assignee_data
-                                    
-                            # 2. 找不到专属字段，直接抓取 authorString (含公司及发明人)
-                            if not org_str and "authorString" in p:
-                                org_str = p["authorString"]
-                                
-                            # 3. 连 authorString 也没有，去 authorList 里强行遍历
-                            if not org_str and "authorList" in p:
-                                authors = p["authorList"].get("author", [])
-                                if isinstance(authors, list):
-                                    org_str = "、".join([a.get("fullName", "") for a in authors if isinstance(a, dict)])
-                            
-                            if not org_str or org_str.strip() == "":
-                                org_str = "未公开"
-                            
-                            google_patent_url = f"https://patents.google.com/patent/{p_num}"
-                            
-                            patent_report.append({
-                                "全球公开号": p_num,
-                                "公开日期": pub_date,
-                                "申请公司 / 发明人": org_str, # 列名稍微改一下，更严谨
-                                "专利名称": title,
-                                "核心摘要": abstract,
-                                "直达阅读链接": google_patent_url
-                            })
-                        
-                        df_patents = pd.DataFrame(patent_report)
-                        st.dataframe(
-                            df_patents, 
-                            column_config={"直达阅读链接": st.column_config.LinkColumn("点击查阅原文")},
-                            use_container_width=True, hide_index=True
-                        )
-                        
-                        safe_q_patent = sanitize_filename(query_patent)
-                        csv_name = f"{safe_q_patent}_Global_Patents.csv"
-                        csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
-                        df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
-                        
-                        with st.spinner("正在将绝密报表推送到云端硬盘..."):
-                            is_up, msg = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
-                            if is_up:
-                                st.success(f"🎉 任务完美结束！**{csv_name}** 报表已成功推送到你的 Google Drive！")
-                                os.remove(csv_path)
-                            else:
-                                st.error(f"报表上传失败: {msg}")
+                p_num = p.get("publication_number
