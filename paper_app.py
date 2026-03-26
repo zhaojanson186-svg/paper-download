@@ -366,6 +366,9 @@ with tab1:
 # ========================================================
 # 引擎 2：专利情报抓取 + AI 深度提纯
 # ========================================================
+# ========================================================
+# 引擎 2：专利情报抓取 + AI 深度提纯
+# ========================================================
 with tab2:
     st.markdown("### 🧠 竞争对手挖掘：大模型提炼核心管线情报")
     query_patent = st.text_input("输入检索关键词 (如靶点、技术全称)", value="CD3 bispecific antibody", key="q_patent")
@@ -383,44 +386,49 @@ with tab2:
                     st.error("网盘授权失败。")
                 else:
                     patents = search_google_patents(query_patent, max_patents)
-                    new_patents = [pt for pt in patents if f"PAT_{pt['全球公开号']}" not in history]
                     
-                    if not new_patents:
-                        st.info("🔕 扫描到的专利均已在历史账本中，无需重复提取！")
+                    # 🥇 核心修复：把丢失的“空数据防线”加回来！
+                    if not patents:
+                        st.warning("⚠️ 未能抓取到专利数据！极大可能是因为刚才频繁测试，触发了谷歌的防爬虫限流机制。请喝口水，稍等几分钟后再试！")
                     else:
-                        st.write(f"✅ 发现 **{len(new_patents)}** 项新专利！大模型正在逐篇拆解抗体构型...")
+                        new_patents = [pt for pt in patents if f"PAT_{pt['全球公开号']}" not in history]
                         
-                        ai_progress = st.progress(0)
-                        ai_status = st.empty()
-                        
-                        for idx, pt in enumerate(new_patents):
-                            ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
-                            ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'])
+                        if not new_patents:
+                            st.info("🔕 扫描到的专利均已在历史账本中，无需重复提取！")
+                        else:
+                            st.write(f"✅ 发现 **{len(new_patents)}** 项新专利！大模型正在逐篇拆解抗体构型...")
                             
-                            pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
-                            pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
-                            pt["💡商业一句话总结"] = ai_insights.get("AI一句话总结", "未提取")
+                            ai_progress = st.progress(0)
+                            ai_status = st.empty()
                             
-                            time.sleep(4.5)
-                            ai_progress.progress((idx + 1) / len(new_patents))
-                        
-                        ai_status.text("🧠 提纯完毕！正在生成全景竞争报表...")
-                        
-                        cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡商业一句话总结", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
-                        df_patents = pd.DataFrame(new_patents)[cols]
-                        
-                        st.dataframe(df_patents, column_config={"直达阅读链接": st.column_config.LinkColumn("点击查阅原文")}, use_container_width=True, hide_index=True)
-                        
-                        timestamp = time.strftime("%m%d_%H%M")
-                        safe_q = sanitize_filename(query_patent)
-                        csv_name = f"{safe_q}_Patent_AI_Report_{timestamp}.csv"
-                        csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
-                        df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
-                        
-                        is_up, _ = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
-                        if is_up:
-                            st.success(f"🎉 任务完美结束！带有 AI 商业总结的报表已推送到网盘！")
-                            os.remove(csv_path)
-                            for pt in new_patents:
-                                history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
-                            save_history(history)
+                            for idx, pt in enumerate(new_patents):
+                                ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
+                                ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'])
+                                
+                                pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
+                                pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
+                                pt["💡商业一句话总结"] = ai_insights.get("AI一句话总结", "未提取")
+                                
+                                time.sleep(4.5)
+                                ai_progress.progress((idx + 1) / len(new_patents))
+                            
+                            ai_status.text("🧠 提纯完毕！正在生成全景竞争报表...")
+                            
+                            cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡商业一句话总结", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
+                            df_patents = pd.DataFrame(new_patents)[cols]
+                            
+                            st.dataframe(df_patents, column_config={"直达阅读链接": st.column_config.LinkColumn("点击查阅原文")}, use_container_width=True, hide_index=True)
+                            
+                            timestamp = time.strftime("%m%d_%H%M")
+                            safe_q = sanitize_filename(query_patent)
+                            csv_name = f"{safe_q}_Patent_AI_Report_{timestamp}.csv"
+                            csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
+                            df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                            
+                            is_up, _ = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
+                            if is_up:
+                                st.success(f"🎉 任务完美结束！带有 AI 商业总结的报表已推送到网盘！")
+                                os.remove(csv_path)
+                                for pt in new_patents:
+                                    history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
+                                save_history(history)
