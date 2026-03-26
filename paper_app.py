@@ -67,7 +67,7 @@ def upload_to_gdrive(drive_service, local_file_path, file_name, folder_id, mime_
         return False, f"上传异常: {str(e)[:50]}"
 
 # ==========================================
-# 3. 核心抓取逻辑：文献 (PMC) + 专利 (USPTO)
+# 3. 核心抓取逻辑：文献 (PMC) + 专利 (Europe PMC 全球生物库)
 # ==========================================
 def sanitize_filename(text):
     clean_text = re.sub(r'[\\/*?:"<>|]', "", text)
@@ -117,26 +117,24 @@ def download_pdf(pmcid, query):
     except Exception:
         return "网络异常", None, None
 
-# --- 专利模块 (终极修复版) ---
-def search_uspto_patents(query, max_results=20):
-    url = "https://api.patentsview.org/patents/query"
-    # 核心修复：扩大搜索范围（标题+摘要），并使用官方严格要求的 assignee_organization 字段
-    payload = {
-        "q": {"_or": [
-            {"_text_any": {"patent_abstract": query}},
-            {"_text_any": {"patent_title": query}}
-        ]},
-        "f": ["patent_number", "patent_title", "patent_date", "patent_abstract", "assignee_organization"],
-        "o": {"per_page": max_results}
+# --- 全新专利模块：Europe PMC 接口 ---
+def search_europepmc_patents(query, max_results=50):
+    """调用专精于生命科学的 Europe PMC 接口，跨国检索(US/EP/WO)专利"""
+    url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    # SRC:PAT 强制过滤出专利数据
+    params = {
+        "query": f'({query}) AND SRC:PAT',
+        "format": "json",
+        "resultType": "core",
+        "pageSize": max_results
     }
     try:
-        res = requests.post(url, json=payload, timeout=20)
+        res = requests.get(url, params=params, timeout=20)
         if res.status_code == 200:
             data = res.json()
-            return data.get("patents") or []
+            return data.get("resultList", {}).get("result", [])
         else:
-            # 加上显微镜：如果专利局报错，直接把原话打印在网页上
-            st.error(f"⚠️ USPTO接口报错 (状态码 {res.status_code}): {res.text[:150]}")
+            st.error(f"⚠️ 全球专利接口报错 (状态码 {res.status_code}): {res.text[:150]}")
             return []
     except Exception as e:
         st.error(f"🚨 专利检索连接异常: {e}")
@@ -167,7 +165,7 @@ with st.sidebar:
         st.rerun()
 
 # --- 构建双标签页 ---
-tab1, tab2 = st.tabs(["📄 核心文献全自动抓取", "💡 专利情报雷达 (USPTO)"])
+tab1, tab2 = st.tabs(["📄 核心文献全自动抓取", "💡 全球抗体专利雷达 (EBI)"])
 
 # ========================================================
 # 引擎 1：文献抓取
@@ -228,11 +226,11 @@ with tab1:
                         st.dataframe(pd.DataFrame(report_data), use_container_width=True)
 
 # ========================================================
-# 引擎 2：专利情报雷达
+# 引擎 2：全球抗体专利雷达 (Europe PMC)
 # ========================================================
 with tab2:
-    st.markdown("### 💡 技术壁垒梳理与竞争情报汇总")
-    st.info("系统将检索美国专利数据库，自动生成 Excel 兼容的商业情报汇总表，并直接推送到网盘。")
+    st.markdown("### 💡 核心技术壁垒与竞争对手挖掘")
+    st.info("系统将检索全球生命科学专利库(包含美国、欧洲、WIPO)，生成 Excel 商业情报报表并推送网盘。")
     
     query_patent = st.text_input("输入检索关键词 (如靶点、技术全称)", value="CD3", key="q_patent")
     max_patents = st.number_input("需梳理的专利数量", min_value=1, max_value=200, value=50)
@@ -241,34 +239,45 @@ with tab2:
         if not query_patent or not gdrive_folder_id:
             st.error("请确保已填写关键词和左侧的 Google Drive 文件夹 ID！")
         else:
-            with st.spinner("正在初始化网盘连接并查询 USPTO 底层数据..."):
+            with st.spinner("正在初始化网盘连接并查询全球专利数据..."):
                 drive_service, err_msg = get_gdrive_service()
                 
                 if not drive_service:
                     st.error("网盘授权失败。")
                 else:
-                    patents = search_uspto_patents(query_patent, max_patents)
+                    patents = search_europepmc_patents(query_patent, max_patents)
                     
                     if not patents:
-                        st.warning("未能检索到相关专利，请尝试更换关键词。如果是 API 报错，请查看上方红色提示。")
+                        st.warning("未能检索到相关专利，请尝试更换关键词。")
                     else:
-                        st.write(f"✅ 成功提取 **{len(patents)}** 项相关专利，正在生成报表...")
+                        st.write(f"✅ 成功跨国提取 **{len(patents)}** 项相关专利，正在生成精美报表...")
                         
                         patent_report = []
                         for p in patents:
-                            assignees = p.get("assignees", [])
-                            orgs = [a.get("assignee_organization", "") for a in assignees if isinstance(a, dict) and a.get("assignee_organization")]
-                            org_str = "、".join(orgs) if orgs else "未公开/个人"
+                            p_num = p.get("id", "无编号")
+                            title = p.get("title", "未公开")
+                            pub_date = p.get("firstPublicationDate", "未知")
+                            abstract = p.get("abstractText", "无摘要")
                             
-                            p_num = p.get("patent_number", "")
+                            # 深度提取公司名称 (Assignee)
+                            assignees = "未公开/个人"
+                            if "patentDetails" in p and "assigneeList" in p["patentDetails"]:
+                                assignee_data = p["patentDetails"]["assigneeList"].get("assignee", [])
+                                if isinstance(assignee_data, list):
+                                    assignees = "、".join(assignee_data)
+                                elif isinstance(assignee_data, str):
+                                    assignees = assignee_data
+                            
+                            # 统一生成 Google Patents 的直达链接，兼容各种国家代号
+                            google_patent_url = f"https://patents.google.com/patent/{p_num}"
                             
                             patent_report.append({
-                                "专利编号": p_num,
-                                "公开日期": p.get("patent_date", ""),
-                                "申请人 / 拥有公司": org_str,
-                                "专利名称": p.get("patent_title", ""),
-                                "核心摘要": p.get("patent_abstract", ""),
-                                "直达阅读链接": f"https://patents.google.com/patent/US{p_num}"
+                                "全球公开号": p_num,
+                                "公开日期": pub_date,
+                                "申请人 / 拥有公司": assignees,
+                                "专利名称": title,
+                                "核心摘要": abstract,
+                                "直达阅读链接": google_patent_url
                             })
                         
                         df_patents = pd.DataFrame(patent_report)
@@ -279,14 +288,14 @@ with tab2:
                         )
                         
                         safe_q_patent = sanitize_filename(query_patent)
-                        csv_name = f"{safe_q_patent}_Patent_Report.csv"
+                        csv_name = f"{safe_q_patent}_Global_Patents.csv"
                         csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
                         df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
                         
-                        with st.spinner("正在将报表推送到云端硬盘..."):
+                        with st.spinner("正在将绝密报表推送到云端硬盘..."):
                             is_up, msg = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
                             if is_up:
-                                st.success(f"🎉 任务完美结束！**{csv_name}** 报表已成功推送到你的 Google Drive。")
+                                st.success(f"🎉 任务完美结束！**{csv_name}** 报表已成功推送到你的 Google Drive！")
                                 os.remove(csv_path)
                             else:
                                 st.error(f"报表上传失败: {msg}")
