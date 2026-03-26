@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import json
 import re
-import urllib.parse # 新增：用于解析谷歌的搜索链接
+import urllib.parse
 
 # Google Drive 官方库
 from google.oauth2.credentials import Credentials
@@ -116,11 +116,9 @@ def download_pdf(pmcid, query):
     except Exception:
         return "网络异常", None, None
 
-# --- 全新专利模块：直连 Google Patents 底层 XHR 接口 ---
+# --- 专利模块：直连 Google Patents 底层 XHR 接口 ---
 def search_google_patents(query, max_results=50):
-    """抓取 Google Patents 最纯正的商业情报"""
     base_url = "https://patents.google.com/xhr/query?url="
-    # 模拟真实网页的请求参数
     q_params = f"q={query}&num={max_results}"
     encoded_q = urllib.parse.quote(q_params)
     full_url = base_url + encoded_q
@@ -147,20 +145,26 @@ def search_google_patents(query, max_results=50):
                 p_num = p.get("publication_number", "无编号")
                 title = p.get("title", "未公开")
                 
-                # 🥇 核心突破：完美提取真实的申请公司
+                # 🥇 核心修复：精准判断字符串还是列表，彻底告别字母被拆开的惨剧
                 assignees = p.get("assignee", [])
-                org_str = "、".join(assignees) if assignees else ""
+                if isinstance(assignees, str):
+                    org_str = assignees
+                elif isinstance(assignees, list):
+                    org_str = "、".join([str(a) for a in assignees])
+                else:
+                    org_str = ""
                 
-                # 如果真的是个人申请，再用发明人兜底
                 if not org_str:
                     inventors = p.get("inventor", [])
-                    org_str = "、".join(inventors) if inventors else "未公开"
+                    if isinstance(inventors, str):
+                        org_str = inventors
+                    elif isinstance(inventors, list):
+                        org_str = "、".join([str(a) for a in inventors])
+                    else:
+                        org_str = "未公开"
                 
-                # 清除谷歌返回的乱七八糟的高亮 HTML 标签 (如 <b>CD3</b>)
                 snippet = p.get("snippet", "无摘要")
                 clean_snippet = re.sub(r'<[^>]+>', '', snippet)
-                
-                # 优先获取优先权日 (最核心的占坑日期)，没有就用申请日
                 pub_date = p.get("priority_date", p.get("filing_date", "未知"))
                 
                 parsed_patents.append({
@@ -195,16 +199,15 @@ with st.sidebar:
     st.markdown("*(必填，PDF和报表将存入此文件夹)*")
     
     st.markdown("---")
-    st.write(f"📖 历史文献处理记录: **{len(history)}** 条")
-    if st.button("🗑️ 清空历史记录", type="secondary"):
+    st.write(f"📖 云端总账本记录数: **{len(history)}** 条")
+    if st.button("🗑️ 清空历史记录 (文献+专利)", type="secondary"):
         if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
-        st.success("文献账本已重置！")
+        st.success("账本已彻底重置！下次检索将重新拉取所有历史数据。")
         time.sleep(1)
         st.rerun()
 
-tab1, tab2 = st.tabs(["📄 核心文献全自动抓取", "💡 全球抗体专利雷达 (Google Patents)"])
+tab1, tab2 = st.tabs(["📄 核心文献全自动抓取", "💡 全球抗体专利雷达 (智能去重)"])
 
-# ... (文献 Tab1 保持不变) ...
 with tab1:
     st.markdown("### 🧬 学术前沿直达")
     query_paper = st.text_input("输入检索关键词 (靶点/适应症)", value="CD3 bispecific antibody", key="q_paper")
@@ -245,6 +248,8 @@ with tab1:
                                     st.error(f"❌ {file_name} 上传失败: {msg}")
                             else:
                                 st.warning(f"⚠️ PMC{pmcid} - {status}")
+                            
+                            # 记录文献历史
                             history[pmcid] = status
                             save_history(history)
                             report_data.append({"文献编号": f"PMC{pmcid}", "状态": status, "网盘同步": upload_status})
@@ -253,19 +258,18 @@ with tab1:
                         status_text.text("文献任务完成！")
                         st.dataframe(pd.DataFrame(report_data), use_container_width=True)
 
-# === 全新 Google Patents 雷达引擎 ===
 with tab2:
     st.markdown("### 💡 核心技术壁垒与竞争对手挖掘")
-    st.info("系统将直连 Google Patents 底层数据库，提取最精准的商业公司情报，生成 Excel 报表并推送网盘。")
+    st.info("系统将直连底层数据库提取商业公司情报，自动剔除历史重复项，仅推送增量报表。")
     
     query_patent = st.text_input("输入检索关键词 (如靶点、技术全称)", value="CD3 bispecific antibody", key="q_patent")
     max_patents = st.number_input("需梳理的专利数量", min_value=1, max_value=200, value=50)
     
-    if st.button("📊 生成专利全景报表并推送网盘", type="primary"):
+    if st.button("📊 生成【增量】专利报表并推送网盘", type="primary"):
         if not query_patent or not gdrive_folder_id:
             st.error("请确保已填写关键词和左侧的 Google Drive 文件夹 ID！")
         else:
-            with st.spinner("正在突破 Google Patents 底层提取精准情报..."):
+            with st.spinner("正在提取专利情报并进行去重比对..."):
                 drive_service, err_msg = get_gdrive_service()
                 if not drive_service:
                     st.error("网盘授权失败。")
@@ -273,26 +277,43 @@ with tab2:
                     patents = search_google_patents(query_patent, max_patents)
                     
                     if not patents:
-                        st.warning("未能检索到相关专利，或者请求过快被拦截。")
+                        st.warning("未能检索到相关专利。")
                     else:
-                        st.write(f"✅ 成功提取 **{len(patents)}** 项带真实公司名的相关专利，正在生成精美报表...")
+                        # 🥇 核心突破：智能去重过滤逻辑
+                        new_patents = []
+                        for pt in patents:
+                            pat_key = f"PAT_{pt['全球公开号']}"
+                            if pat_key not in history:
+                                new_patents.append(pt)
                         
-                        df_patents = pd.DataFrame(patents)
-                        st.dataframe(
-                            df_patents, 
-                            column_config={"直达阅读链接": st.column_config.LinkColumn("点击查阅原文")},
-                            use_container_width=True, hide_index=True
-                        )
-                        
-                        safe_q_patent = sanitize_filename(query_patent)
-                        csv_name = f"{safe_q_patent}_Google_Patents.csv"
-                        csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
-                        df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
-                        
-                        with st.spinner("正在将绝密报表推送到云端硬盘..."):
-                            is_up, msg = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
-                            if is_up:
-                                st.success(f"🎉 商业情报挖掘完成！**{csv_name}** 报表已成功推送到你的 Google Drive！")
-                                os.remove(csv_path)
-                            else:
-                                st.error(f"报表上传失败: {msg}")
+                        if not new_patents:
+                            st.info(f"🔕 本次雷达扫描了 {len(patents)} 项顶级专利，但**全部都在历史账本中**。系统已拦截重复推送！")
+                        else:
+                            st.write(f"✅ 扫描到 {len(patents)} 项专利，剔除已推送的，**发现 {len(new_patents)} 项新专利！** 正在生成报表...")
+                            
+                            df_patents = pd.DataFrame(new_patents)
+                            st.dataframe(
+                                df_patents, 
+                                column_config={"直达阅读链接": st.column_config.LinkColumn("点击查阅原文")},
+                                use_container_width=True, hide_index=True
+                            )
+                            
+                            # 给文件名加上时间戳，防止在网盘里重名覆盖
+                            timestamp = time.strftime("%m%d_%H%M")
+                            safe_q_patent = sanitize_filename(query_patent)
+                            csv_name = f"{safe_q_patent}_NewPatents_{timestamp}.csv"
+                            csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
+                            df_patents.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                            
+                            with st.spinner("正在将增量绝密报表推送到云端硬盘..."):
+                                is_up, msg = upload_to_gdrive(drive_service, csv_path, csv_name, gdrive_folder_id, mime_type='text/csv')
+                                if is_up:
+                                    st.success(f"🎉 商业情报挖掘完成！**{csv_name}** 报表已推送到网盘！")
+                                    os.remove(csv_path)
+                                    
+                                    # 推送成功后，将这批新专利写入账本
+                                    for pt in new_patents:
+                                        history[f"PAT_{pt['全球公开号']}"] = "✅ 已推送报表"
+                                    save_history(history)
+                                else:
+                                    st.error(f"报表上传失败: {msg}")
