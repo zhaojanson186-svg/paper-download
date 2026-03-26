@@ -11,10 +11,10 @@ import json
 import re
 
 # Google Drive 官方库
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError  # 新增：专门用于捕获谷歌的详细报错
+from googleapiclient.errors import HttpError
 
 # ==========================================
 # 1. 配置区与历史记录系统
@@ -40,17 +40,23 @@ def save_history(history):
         json.dump(history, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 2. Google Drive 上传引擎 (深度诊断版)
+# 2. Google Drive 上传引擎 (真人授权终极版)
 # ==========================================
-def upload_to_gdrive(local_file_path, file_name, folder_id):
-    """将下载好的 PDF 闪电推送到谷歌网盘，并解析详细错误"""
+def get_gdrive_service():
+    """读取云端的真人 Token 并建立连接"""
     try:
-        raw_key = st.secrets["GCP_KEY"]
-        key_dict = json.loads(raw_key, strict=False) 
-        
-        creds = service_account.Credentials.from_service_account_info(key_dict)
+        raw_token = st.secrets["GCP_TOKEN"]
+        token_dict = json.loads(raw_token, strict=False)
+        # 核心改变：使用真人 OAuth Token 建立凭证，无视配额限制！
+        creds = Credentials.from_authorized_user_info(token_dict)
         drive_service = build('drive', 'v3', credentials=creds)
-        
+        return drive_service, None
+    except Exception as e:
+        return None, f"Token解析失败: {str(e)}"
+
+def upload_to_gdrive(drive_service, local_file_path, file_name, folder_id):
+    """将下载好的 PDF 推送到谷歌网盘"""
+    try:
         file_metadata = {'name': file_name, 'parents': [folder_id]}
         media = MediaFileUpload(local_file_path, mimetype='application/pdf')
         
@@ -60,27 +66,14 @@ def upload_to_gdrive(local_file_path, file_name, folder_id):
             fields='id'
         ).execute()
         return True, file.get('id')
-        
     except HttpError as error:
-        # 核心改动：把谷歌原汁原味的报错信息提取出来
         try:
-            error_content = json.loads(error.content.decode('utf-8'))
-            error_message = error_content.get('error', {}).get('message', str(error))
+            error_message = json.loads(error.content.decode('utf-8'))['error']['message']
         except:
             error_message = str(error)
-            
-        # 翻译几个最常见的错误
-        if "File not found" in error_message:
-            return False, "找不到文件夹！请检查 ID 是否正确，且是否已将机器人设为编辑者。"
-        elif "Google Drive API has not been used" in error_message:
-            return False, "Google Drive API 未启用！请去 Google Cloud 控制台点击启用。"
-            
-        return False, f"谷歌服务器拒绝: {error_message}"
-        
-    except json.JSONDecodeError as e:
-        return False, f"密钥格式错误: {str(e)}"
+        return False, f"谷歌接口报错: {error_message}"
     except Exception as e:
-        return False, f"网盘连接报错: {type(e).__name__}"
+        return False, f"上传异常: {type(e).__name__}"
 
 # ==========================================
 # 3. 核心抓取逻辑
@@ -140,15 +133,15 @@ def download_pdf(pmcid, query):
 # ==========================================
 st.set_page_config(page_title="AI 智能文献直传终端", layout="centered", page_icon="☁️")
 
-st.title("☁️ AI 智能文献直传终端")
-st.markdown("全自动云端抓取，并实时同步推送到你的 Google Drive 资料库。")
+st.title("☁️ AI 智能文献直传终端 (终极版)")
+st.markdown("全自动云端抓取，基于 OAuth 真人授权，无限制推送到 Google Drive。")
 
 history = load_history()
 
 with st.sidebar:
     st.header("⚙️ 存储配置")
     gdrive_folder_id = st.text_input("📁 Google Drive 文件夹 ID", placeholder="粘贴你的文件夹ID")
-    st.markdown("*(必填，机器人会将文件传到此文件夹)*")
+    st.markdown("*(必填，PDF 将直接存入此文件夹)*")
     
     st.markdown("---")
     st.write(f"📖 历史处理记录: **{len(history)}** 条")
@@ -167,49 +160,55 @@ if st.button("🚀 开始极速抓取并上传", type="primary"):
     elif not gdrive_folder_id:
         st.error("请在左侧栏填入 Google Drive 文件夹 ID！")
     else:
-        with st.spinner("正在筛选新文献..."):
-            all_pmc_ids = search_pmc_oa(query, max_results)
-        
-        if not all_pmc_ids:
-            st.info("没有找到相关公开文献。")
-        else:
-            new_pmc_ids = [pid for pid in all_pmc_ids if pid not in history]
-            st.info(f"📊 已跳过 {len(all_pmc_ids) - len(new_pmc_ids)} 篇历史记录，本次抓取 **{len(new_pmc_ids)}** 篇。")
+        with st.spinner("正在初始化 Google Drive 授权通道..."):
+            drive_service, err_msg = get_gdrive_service()
             
-            if len(new_pmc_ids) > 0:
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                report_data = []
+        if not drive_service:
+            st.error(f"网盘授权失败: {err_msg}。请检查 Streamlit Secrets 中的 GCP_TOKEN 配置。")
+        else:
+            with st.spinner("正在筛选新文献..."):
+                all_pmc_ids = search_pmc_oa(query, max_results)
+            
+            if not all_pmc_ids:
+                st.info("没有找到相关公开文献。")
+            else:
+                new_pmc_ids = [pid for pid in all_pmc_ids if pid not in history]
+                st.info(f"📊 已跳过 {len(all_pmc_ids) - len(new_pmc_ids)} 篇历史记录，本次抓取 **{len(new_pmc_ids)}** 篇。")
                 
-                for i, pmcid in enumerate(new_pmc_ids):
-                    status_text.text(f"正在处理: PMC{pmcid} ({i+1}/{len(new_pmc_ids)})")
+                if len(new_pmc_ids) > 0:
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    report_data = []
                     
-                    status, local_path, file_name = download_pdf(pmcid, query)
-                    upload_status = "未触发"
-                    
-                    if status == "下载成功":
-                        is_uploaded, msg = upload_to_gdrive(local_path, file_name, gdrive_folder_id)
-                        if is_uploaded:
-                            upload_status = "✅ 成功推送到网盘"
-                            st.success(f"☁️ {file_name} -> 已保存到网盘")
-                            os.remove(local_path)
+                    for i, pmcid in enumerate(new_pmc_ids):
+                        status_text.text(f"正在处理: PMC{pmcid} ({i+1}/{len(new_pmc_ids)})")
+                        
+                        status, local_path, file_name = download_pdf(pmcid, query)
+                        upload_status = "未触发"
+                        
+                        if status == "下载成功":
+                            is_uploaded, msg = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id)
+                            if is_uploaded:
+                                upload_status = "✅ 成功推送到网盘"
+                                st.success(f"☁️ {file_name} -> 已保存到网盘")
+                                os.remove(local_path)
+                            else:
+                                upload_status = f"上传报错: {msg[:60]}"
+                                st.error(f"❌ {file_name} 上传失败: {msg}")
                         else:
-                            upload_status = f"上传报错: {msg[:60]}" # 展示更长的报错信息
-                            st.error(f"❌ {file_name} 上传失败: {msg}")
-                    else:
-                        st.warning(f"⚠️ PMC{pmcid} - {status}")
+                            st.warning(f"⚠️ PMC{pmcid} - {status}")
 
-                    history[pmcid] = status
-                    save_history(history)
+                        history[pmcid] = status
+                        save_history(history)
+                        
+                        report_data.append({
+                            "文献编号": f"PMC{pmcid}",
+                            "抓取状态": status,
+                            "网盘同步状态": upload_status
+                        })
+                        
+                        time.sleep(1) 
+                        progress_bar.progress((i + 1) / len(new_pmc_ids))
                     
-                    report_data.append({
-                        "文献编号": f"PMC{pmcid}",
-                        "抓取状态": status,
-                        "网盘同步状态": upload_status
-                    })
-                    
-                    time.sleep(1) 
-                    progress_bar.progress((i + 1) / len(new_pmc_ids))
-                
-                status_text.text("全部任务完成！")
-                st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
+                    status_text.text("全部任务完成！")
+                    st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
