@@ -173,7 +173,7 @@ with tab2:
 
                                 history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
                                 
-                                time.sleep(4.5) # 防封限速红线
+                                time.sleep(6.0) # 防封限速红线
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
                             ai_status.text("🧠 提纯完毕！正在生成全景竞争报表...")
