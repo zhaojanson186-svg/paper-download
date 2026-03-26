@@ -23,6 +23,10 @@ Entrez.email = "your_email@example.com"
 DOWNLOAD_DIR = "PDF_Downloads"
 HISTORY_FILE = "download_history.json"
 AI_PARSE_DEBUG_LOG_FILE = "ai_parse_debug.jsonl"
+PATENT_FETCH_DEBUG_LOG_FILE = "patent_fetch_debug.jsonl"
+
+# 用于把最近一次专利抓取失败原因带回到 UI
+_last_patent_fetch_debug = None
 
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
@@ -256,7 +260,8 @@ def requests_get_with_retry(url, headers=None, timeout=15, max_retries: int = 3)
     for attempt in range(max_retries):
         try:
             r = requests.get(url, headers=headers, timeout=timeout)
-            if r.status_code == 429 or 500 <= r.status_code < 600:
+            # 429/403/5xx 都常见于反爬与临时故障，做指数退避重试
+            if r.status_code in (429, 403) or 500 <= r.status_code < 600:
                 _time.sleep(2 ** attempt + 1)
                 continue
             return r
@@ -411,14 +416,32 @@ def search_google_patents(query, max_results=50):
     q_params = f"q={query}&num={max_results}"
     encoded_q = urllib.parse.quote(q_params)
     full_url = base_url + encoded_q
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://patents.google.com/",
+    }
     try:
-        res = requests_get_with_retry(full_url, headers=headers, timeout=20, max_retries=3)
+        global _last_patent_fetch_debug
+        _last_patent_fetch_debug = {"query": query, "max_results": max_results, "url": full_url}
+
+        res = requests_get_with_retry(full_url, headers=headers, timeout=20, max_retries=4)
+        _last_patent_fetch_debug["status_code"] = getattr(res, "status_code", None)
+        _last_patent_fetch_debug["response_preview"] = safe_truncate(getattr(res, "text", ""), 300)
         if res.status_code != 200:
             return []
 
-        clusters = res.json().get("results", {}).get("cluster", [])
+        try:
+            payload = res.json()
+        except Exception as e:
+            _last_patent_fetch_debug["json_error"] = str(e)
+            return []
+
+        clusters = payload.get("results", {}).get("cluster", [])
         if not clusters:
+            _last_patent_fetch_debug["clusters_empty"] = True
             return []
 
         parsed_patents = []
@@ -457,10 +480,30 @@ def search_google_patents(query, max_results=50):
                 "核心摘要": clean_snippet,
                 "直达阅读链接": f"https://patents.google.com/patent/{p_num}",
             })
+
+        # 抓取成功也写一条（不影响性能，且只在用户开销明显失败时才看得用）
+        try:
+            with open(PATENT_FETCH_DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({**_last_patent_fetch_debug, "ok": True, "parsed_count": len(parsed_patents)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
         return parsed_patents
     except Exception:
+        # 记录最后一次异常，便于 UI 展示
+        try:
+            import traceback
+            _last_patent_fetch_debug = _last_patent_fetch_debug or {"query": query, "max_results": max_results, "url": full_url}
+            _last_patent_fetch_debug["exception"] = traceback.format_exc()
+            with open(PATENT_FETCH_DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({**_last_patent_fetch_debug, "ok": False}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
         return []
         # ==========================================
+
+def get_last_patent_fetch_debug():
+    global _last_patent_fetch_debug
+    return _last_patent_fetch_debug or {}
 # 5. 前端网页界面
 # ==========================================
 st.set_page_config(page_title="双擎 AI 情报终端", layout="wide", page_icon="🧠")
@@ -614,7 +657,19 @@ with tab2:
                     
                     # 🥇 核心修复：把丢失的“空数据防线”加回来！
                     if not patents:
-                        st.warning("⚠️ 未能抓取到专利数据！极大可能是因为刚才频繁测试，触发了谷歌的防爬虫限流机制。请喝口水，稍等几分钟后再试！")
+                        debug = get_last_patent_fetch_debug()
+                        status_code = debug.get("status_code", None)
+                        resp_prev = debug.get("response_preview", "")
+                        extra = ""
+                        if status_code == 429:
+                            extra = "（429：限流）"
+                        elif status_code == 403:
+                            extra = "（403：疑似被拦截/反爬）"
+                        elif status_code:
+                            extra = f"（HTTP {status_code}）"
+                        st.warning(f"⚠️ 未能抓取到专利数据{extra}。请稍等几分钟后再试，或稍后查看调试信息定位原因。")
+                        if resp_prev:
+                            st.info(f"抓取返回预览（截断）：{resp_prev}")
                     else:
                         new_patents = [pt for pt in patents if f"PAT_{pt['全球公开号']}" not in history]
                         
