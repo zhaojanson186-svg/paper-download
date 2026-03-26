@@ -42,6 +42,9 @@ def save_history(history):
 # ==========================================
 # 2. AI 提纯双引擎 (完全避开网页Bug的安全版)
 # ==========================================
+# ==========================================
+# 2. AI 提纯双引擎 (抗医疗误伤 + 终极提取版)
+# ==========================================
 def init_ai_model():
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
@@ -57,28 +60,37 @@ def analyze_paper_with_ai(model, abstract_text):
     
     prompt = f"""
     作为资深抗体药物研发专家，请阅读以下学术文献摘要，提取关键科研情报。
-    请直接输出一个合法的 JSON 格式，严格包含以下 3 个键名，绝对不要输出 markdown 代码块标记：
+    请直接输出一个合法的 JSON 格式，严格包含以下 3 个键名，绝对不要输出多余解释：
     {{
-        "靶点组合": "提取文献研究的靶点(如 CD3, BCMA等)，若无则写'未提及'",
-        "实验模型": "提取研究使用的模型(如 细胞系、小鼠模型、临床I期等)，若无则写'未提及'",
-        "AI核心结论": "用15个字以内的中文高度概括其核心药效、安全性或主要发现"
+        "靶点组合": "提取文献研究的靶点(如 CD3等)，若无则写'未提及'",
+        "实验模型": "提取研究使用的模型(如 细胞系、小鼠等)，若无则写'未提及'",
+        "AI核心结论": "用15个字以内的中文高度概括药效或发现"
     }}
     摘要原文：
     {abstract_text}
     """
     try:
-        res = model.generate_content(prompt).text.strip()
-        # 【核心修复】：放弃正则表达式，改用最安全的字符串替换，防止网页解析崩溃
-        res = res.replace("```json", "").replace("```", "").strip()
-        data = json.loads(res)
-        return {
-            "靶点组合": data.get("靶点组合", "未提取"),
-            "实验模型": data.get("实验模型", "未提取"),
-            "AI核心结论": data.get("AI核心结论", "未提取")
-        }
+        # 核心修复 1：放宽生物医药词汇的安全审查，防止被误伤拦截
+        res = model.generate_content(prompt, safety_settings=[
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+        ]).text
+        
+        # 核心修复 2：用正则精准扣出大括号及里面的内容，彻底无视外面的废话！
+        import re
+        match = re.search(r'\{.*\}', res, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            return {
+                "靶点组合": str(data.get("靶点组合", "未提取")),
+                "实验模型": str(data.get("实验模型", "未提取")),
+                "AI核心结论": str(data.get("AI核心结论", "未提取"))
+            }
+        return {"靶点组合": "格式错", "实验模型": "格式错", "AI核心结论": "未找到JSON"}
     except Exception as e:
-        err = "请求过快被限流" if "429" in str(e) else "解析报错"
-        return {"靶点组合": err, "实验模型": err, "AI核心结论": err}
+        # 核心修复 3：真实报错透传，再失败就能在表格里直接看到死因！
+        err = str(e).replace('\n', ' ')
+        if "429" in err: err = "请求过快被限流"
+        return {"靶点组合": "解析报错", "实验模型": "真实原因:", "AI核心结论": err[:35]}
 
 def analyze_patent_with_ai(model, abstract_text):
     if not model or not abstract_text or len(abstract_text) < 20:
@@ -86,28 +98,34 @@ def analyze_patent_with_ai(model, abstract_text):
     
     prompt = f"""
     作为资深抗体药物研发专家，请阅读以下专利摘要，提取关键商业与技术情报。
-    请直接输出一个合法的 JSON 格式，严格包含以下 3 个键名，绝对不要输出 markdown 代码块标记：
+    请直接输出一个合法的 JSON 格式，严格包含以下 3 个键名，绝对不要输出多余解释：
     {{
-        "靶点组合": "提取提到的所有靶点(如 CD3, BCMA, HER2等)，若无则写'未提及'",
-        "抗体构型": "提取抗体类型或技术平台(如 scFv, VHH, Bispecific, ADC等)，若无则写'未提及'",
-        "AI一句话总结": "用15个字以内的中文高度概括其核心适应症或创新点"
+        "靶点组合": "提取提到的所有靶点(如 CD3等)，若无则写'未提及'",
+        "抗体构型": "提取抗体类型或技术平台(如 scFv, ADC等)，若无则写'未提及'",
+        "AI一句话总结": "用15个字以内的中文高度概括其核心适应症"
     }}
     摘要原文：
     {abstract_text}
     """
     try:
-        res = model.generate_content(prompt).text.strip()
-        # 【核心修复】：同样使用安全的字符串替换
-        res = res.replace("```json", "").replace("```", "").strip()
-        data = json.loads(res)
-        return {
-            "靶点组合": data.get("靶点组合", "未提取"),
-            "抗体构型": data.get("抗体构型", "未提取"),
-            "AI一句话总结": data.get("AI一句话总结", "未提取")
-        }
+        res = model.generate_content(prompt, safety_settings=[
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+        ]).text
+        
+        import re
+        match = re.search(r'\{.*\}', res, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            return {
+                "靶点组合": str(data.get("靶点组合", "未提取")),
+                "抗体构型": str(data.get("抗体构型", "未提取")),
+                "AI一句话总结": str(data.get("AI一句话总结", "未提取"))
+            }
+        return {"靶点组合": "格式错", "抗体构型": "格式错", "AI一句话总结": "未找到JSON"}
     except Exception as e:
-        err = "请求过快被限流" if "429" in str(e) else "解析报错"
-        return {"靶点组合": err, "抗体构型": err, "AI一句话总结": err}
+        err = str(e).replace('\n', ' ')
+        if "429" in err: err = "请求过快被限流"
+        return {"靶点组合": "解析报错", "抗体构型": "真实原因:", "AI一句话总结": err[:35]}
 
 # ==========================================
 # 3. Google Drive 上传引擎
