@@ -22,6 +22,7 @@ import google.generativeai as genai
 Entrez.email = "your_email@example.com"
 DOWNLOAD_DIR = "PDF_Downloads"
 HISTORY_FILE = "download_history.json"
+AI_PARSE_DEBUG_LOG_FILE = "ai_parse_debug.jsonl"
 
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
@@ -45,14 +46,224 @@ def save_history(history):
 # ==========================================
 # 2. AI 提纯双引擎 (抗医疗误伤 + 终极提取版)
 # ==========================================
-def init_ai_model():
+def init_ai_model(model_name: str = "gemini-1.5-flash-latest"):
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 支持用户输入带资源前缀的写法，如 "models/gemini-1.5-flash"
+        mn = str(model_name).strip()
+        if mn.startswith("models/"):
+            mn = mn[len("models/") :]
+        model = genai.GenerativeModel(mn)
         return model
     except Exception:
         return None
+
+def list_available_gemini_models(max_items: int = 50):
+    """
+    尝试从当前 API Key 拉取可用的模型列表（用于排查 404/权限问题）。
+    返回值：list[str]
+    """
+    try:
+        api_models = genai.list_models()
+        # 兼容 generator / list
+        out = []
+        for m in api_models:
+            name = getattr(m, "name", None) or getattr(m, "model_name", None) or str(m)
+            name = str(name)
+            if name.startswith("models/"):
+                name = name[len("models/") :]
+            out.append(name)
+            if len(out) >= max_items:
+                break
+        return out
+    except Exception:
+        return []
+
+def extract_json_object(text: str):
+    """
+    从模型输出中尽可能稳健地提取第一段 JSON 对象。
+    支持：
+    1) ```json ... ``` 代码块
+    2) 直接在文本中做括号配对截取
+    """
+    import re
+    if not text:
+        return None
+
+    # 1) 优先抓 ```json ... ``` 代码块
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if m:
+        candidate = m.group(1).strip()
+        # 代码块里如果仍不是 JSON，就继续尝试括号截取
+        try:
+            json.loads(candidate)
+            return candidate
+        except Exception:
+            pass
+
+    # 2) 括号配对：从第一个 '{' 开始，找到对应的 '}' 结束
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : i + 1]
+                return candidate.strip()
+    return None
+
+def parse_ai_json(text: str):
+    candidate = extract_json_object(text)
+    if not candidate:
+        return None
+    try:
+        return json.loads(candidate)
+    except Exception:
+        return None
+
+def safe_truncate(text: str, limit: int = 800):
+    if text is None:
+        return ""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...(truncated,{len(text)} chars)"
+
+def generate_ai_json_with_retry(model, prompt: str, expected_keys: list, max_retries: int = 3):
+    """
+    调用 LLM 并尽可能保证返回结构：
+    - 返回 dict，包含 expected_keys 中的所有键（缺失则用'未提取'兜底）
+    - 遇到 429/短暂异常会重试，并把最终原因写到对应字段里
+    """
+    if not model or not prompt:
+        return {k: "未提取" for k in expected_keys}
+
+    import time as _time
+    last_err = ""
+    # 防止不同 Streamlit 版本/运行上下文导致 session_state 不可用
+    try:
+        ss = getattr(st, "session_state", {}) or {}
+        debug_enabled = bool(ss.get("debug_ai_parse", False))
+    except Exception:
+        debug_enabled = False
+    # 仅在调试时落盘，避免频繁写文件影响性能
+    do_log = debug_enabled
+
+    def _log_debug(payload: dict):
+        if not do_log:
+            return
+        try:
+            with open(AI_PARSE_DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            # 日志失败不影响主流程
+            pass
+
+    for attempt in range(max_retries):
+        try:
+            res_text = model.generate_content(
+                prompt,
+                # 比 BLOCK_NONE 更保守，避免无边界放开导致的合规风险
+                safety_settings=[
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"}
+                ],
+            ).text
+            candidate = extract_json_object(res_text)
+            data = None
+            parse_error = ""
+            if candidate:
+                try:
+                    data = json.loads(candidate)
+                except Exception as e:
+                    parse_error = str(e).replace("\n", " ")
+                    data = None
+
+            if debug_enabled:
+                with st.expander(f"🧪 AI 解析调试（attempt {attempt+1}/{max_retries}）", expanded=False):
+                    st.write("expected_keys:", expected_keys)
+                    st.write("是否找到 JSON 片段(candidate):", bool(candidate))
+                    if candidate:
+                        st.write("candidate 预览：")
+                        st.code(safe_truncate(candidate, 900))
+                    st.write("模型输出预览：")
+                    st.code(safe_truncate(res_text, 900))
+                    if parse_error:
+                        st.write("JSON loads 错误：", parse_error)
+
+            if not isinstance(data, dict):
+                # 解析失败时继续重试，让模型更可能按格式输出
+                last_err = "解析失败(无JSON/非dict)" if not candidate else f"解析失败(JSONloads失败): {parse_error[:60]}"
+                _log_debug(
+                    {
+                        "ts": time.time(),
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "expected_keys": expected_keys,
+                        "last_err": last_err,
+                        "candidate_found": bool(candidate),
+                        "candidate_preview": safe_truncate(candidate, 500) if candidate else None,
+                        "response_preview": safe_truncate(res_text, 500),
+                    }
+                )
+                if attempt < max_retries - 1:
+                    continue
+                return {k: "解析失败(无法提取JSON)" for k in expected_keys}
+
+            out = {}
+            for k in expected_keys:
+                v = data.get(k, "未提取")
+                out[k] = str(v) if v is not None else "未提取"
+            return out
+        except Exception as e:
+            last_err = str(e).replace("\n", " ")
+            _log_debug(
+                {
+                    "ts": time.time(),
+                    "attempt": attempt + 1,
+                    "max_retries": max_retries,
+                    "expected_keys": expected_keys,
+                    "last_err": last_err,
+                    "candidate_found": None,
+                    "candidate_preview": None,
+                    "response_preview": None,
+                }
+            )
+            # 429：退避重试
+            if "429" in last_err and attempt < max_retries - 1:
+                _time.sleep(2 ** attempt + 1)
+                continue
+            break
+
+    # 终局：把错误塞进第一个字段里便于定位
+    out = {k: "解析报错" for k in expected_keys}
+    if expected_keys:
+        out[expected_keys[0]] = last_err[:60] if last_err else "解析报错"
+    return out
+
+def requests_get_with_retry(url, headers=None, timeout=15, max_retries: int = 3):
+    """requests.get 的简化版重试：遇到 429/5xx 做指数退避。"""
+    import time as _time
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout)
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                _time.sleep(2 ** attempt + 1)
+                continue
+            return r
+        except Exception as e:
+            last_err = e
+            _time.sleep(2 ** attempt + 1)
+    if last_err:
+        raise last_err
+    # 理论上不会到这；兜底抛异常更利于定位
+    raise Exception(f"GET failed after {max_retries} retries: {url}")
 
 def analyze_paper_with_ai(model, abstract_text):
     if not model or not abstract_text or len(abstract_text) < 20:
@@ -66,26 +277,17 @@ def analyze_paper_with_ai(model, abstract_text):
         "实验模型": "提取研究使用的模型(如 细胞系、小鼠等)，若无则写'未提及'",
         "AI核心结论": "用15个字以内的中文高度概括药效或发现"
     }}
+    限定说明：只做信息抽取，不给出任何诊断/治疗建议或操作步骤。
     摘要原文：
     {abstract_text}
     """
     try:
-        # 核心修复 1：放宽生物医药词汇的安全审查，防止被误伤拦截
-        res = model.generate_content(prompt, safety_settings=[
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-        ]).text
-        
-        # 核心修复 2：用正则精准扣出大括号及里面的内容，彻底无视外面的废话！
-        import re
-        match = re.search(r'\{.*\}', res, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            return {
-                "靶点组合": str(data.get("靶点组合", "未提取")),
-                "实验模型": str(data.get("实验模型", "未提取")),
-                "AI核心结论": str(data.get("AI核心结论", "未提取"))
-            }
-        return {"靶点组合": "格式错", "实验模型": "格式错", "AI核心结论": "未找到JSON"}
+        return generate_ai_json_with_retry(
+            model=model,
+            prompt=prompt,
+            expected_keys=["靶点组合", "实验模型", "AI核心结论"],
+            max_retries=3,
+        )
     except Exception as e:
         # 核心修复 3：真实报错透传，再失败就能在表格里直接看到死因！
         err = str(e).replace('\n', ' ')
@@ -104,24 +306,17 @@ def analyze_patent_with_ai(model, abstract_text):
         "抗体构型": "提取抗体类型或技术平台(如 scFv, ADC等)，若无则写'未提及'",
         "AI一句话总结": "用15个字以内的中文高度概括其核心适应症"
     }}
+    限定说明：只做信息抽取，不给出任何诊断/治疗建议或操作步骤。
     摘要原文：
     {abstract_text}
     """
     try:
-        res = model.generate_content(prompt, safety_settings=[
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-        ]).text
-        
-        import re
-        match = re.search(r'\{.*\}', res, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            return {
-                "靶点组合": str(data.get("靶点组合", "未提取")),
-                "抗体构型": str(data.get("抗体构型", "未提取")),
-                "AI一句话总结": str(data.get("AI一句话总结", "未提取"))
-            }
-        return {"靶点组合": "格式错", "抗体构型": "格式错", "AI一句话总结": "未找到JSON"}
+        return generate_ai_json_with_retry(
+            model=model,
+            prompt=prompt,
+            expected_keys=["靶点组合", "抗体构型", "AI一句话总结"],
+            max_retries=3,
+        )
     except Exception as e:
         err = str(e).replace('\n', ' ')
         if "429" in err: err = "请求过快被限流"
@@ -159,7 +354,7 @@ def sanitize_filename(text):
 def fetch_pmc_metadata(pmcid):
     try:
         url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmcid}&retmode=xml"
-        res = requests.get(url, timeout=15)
+        res = requests_get_with_retry(url, timeout=15)
         root = ET.fromstring(res.content)
         title_node = root.find(".//article-title")
         title = "".join(title_node.itertext()) if title_node is not None else f"PMC{pmcid}"
@@ -175,7 +370,7 @@ def download_pdf(pmcid, query):
     file_path = os.path.join(DOWNLOAD_DIR, file_name)
     api_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=PMC{pmcid}"
     try:
-        res_xml = requests.get(api_url, timeout=15)
+        res_xml = requests_get_with_retry(api_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         if res_xml.status_code != 200: return "API拒绝响应", None, None
         root = ET.fromstring(res_xml.content)
         pdf_link = None
@@ -188,7 +383,7 @@ def download_pdf(pmcid, query):
             pdf_link = pdf_link.replace("ftp://", "https://")
         
         headers = {"User-Agent": "Mozilla/5.0"}
-        res_pdf = requests.get(pdf_link, headers=headers, timeout=30)
+        res_pdf = requests_get_with_retry(pdf_link, headers=headers, timeout=30)
         if res_pdf.status_code == 200 and res_pdf.content.startswith(b"%PDF"):
             with open(file_path, "wb") as f:
                 f.write(res_pdf.content)
@@ -215,41 +410,51 @@ def search_google_patents(query, max_results=50):
     full_url = base_url + encoded_q
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     try:
-        res = requests.get(full_url, headers=headers, timeout=20)
-        if res.status_code == 200:
-            clusters = res.json().get("results", {}).get("cluster", [])
-            if not clusters: return []
-            parsed_patents = []
-            for item in clusters[0].get("result", []):
-                p = item.get("patent", {})
-                if not p: continue
-                p_num = p.get("publication_number", "无编号")
-                title = p.get("title", "未公开")
-                
-                assignees = p.get("assignee", [])
-                if isinstance(assignees, str): org_str = assignees
-                elif isinstance(assignees, list): org_str = "、".join([str(a) for a in assignees])
-                else: org_str = ""
-                
-                if not org_str:
-                    inventors = p.get("inventor", [])
-                    if isinstance(inventors, str): org_str = inventors
-                    elif isinstance(inventors, list): org_str = "、".join([str(a) for a in inventors])
-                    else: org_str = "未公开"
-                
-                clean_snippet = re.sub(r'<[^>]+>', '', p.get("snippet", "无摘要"))
-                pub_date = p.get("priority_date", p.get("filing_date", "未知"))
-                
-                parsed_patents.append({
-                    "全球公开号": p_num,
-                    "优先权/申请日": pub_date,
-                    "申请公司 / 拥有者": org_str,
-                    "专利名称": title,
-                    "核心摘要": clean_snippet,
-                    "直达阅读链接": f"https://patents.google.com/patent/{p_num}"
-                })
-            return parsed_patents
-        return []
+        res = requests_get_with_retry(full_url, headers=headers, timeout=20, max_retries=3)
+        if res.status_code != 200:
+            return []
+
+        clusters = res.json().get("results", {}).get("cluster", [])
+        if not clusters:
+            return []
+
+        parsed_patents = []
+        for item in clusters[0].get("result", []):
+            p = item.get("patent", {})
+            if not p:
+                continue
+            p_num = p.get("publication_number", "无编号")
+            title = p.get("title", "未公开")
+
+            assignees = p.get("assignee", [])
+            if isinstance(assignees, str):
+                org_str = assignees
+            elif isinstance(assignees, list):
+                org_str = "、".join([str(a) for a in assignees])
+            else:
+                org_str = ""
+
+            if not org_str:
+                inventors = p.get("inventor", [])
+                if isinstance(inventors, str):
+                    org_str = inventors
+                elif isinstance(inventors, list):
+                    org_str = "、".join([str(a) for a in inventors])
+                else:
+                    org_str = "未公开"
+
+            clean_snippet = re.sub(r"<[^>]+>", "", p.get("snippet", "无摘要"))
+            pub_date = p.get("priority_date", p.get("filing_date", "未知"))
+
+            parsed_patents.append({
+                "全球公开号": p_num,
+                "优先权/申请日": pub_date,
+                "申请公司 / 拥有者": org_str,
+                "专利名称": title,
+                "核心摘要": clean_snippet,
+                "直达阅读链接": f"https://patents.google.com/patent/{p_num}",
+            })
+        return parsed_patents
     except Exception:
         return []
         # ==========================================
@@ -267,11 +472,37 @@ with st.sidebar:
     gdrive_folder_id = st.text_input("📁 Google Drive 文件夹 ID", placeholder="粘贴你的文件夹ID")
     st.markdown("---")
     
-    ai_model = init_ai_model()
+    if "gemini_model_name" not in st.session_state:
+        st.session_state["gemini_model_name"] = "gemini-1.5-flash-latest"
+
+    st.caption("用于 Gemini API 的模型 id（Google AI Studio 可用的 model 名称）")
+    gemini_model_name = st.text_input("🤖 Gemini model id", key="gemini_model_name")
+
+    if st.button("🔄 刷新可用模型列表", type="secondary"):
+        with st.spinner("正在拉取可用模型列表..."):
+            models = list_available_gemini_models(max_items=50)
+        st.session_state["available_gemini_models"] = models
+        if models:
+            st.success(f"获取到 {len(models)} 个模型：请从下方选择或手动修改。")
+        else:
+            st.warning("未能获取模型列表（可能是 SDK/权限限制/网络原因）。仍可手动填写 model id。")
+
+    available_models = st.session_state.get("available_gemini_models") or []
+    if available_models:
+        pick_default = available_models.index(gemini_model_name) if gemini_model_name in available_models else 0
+        picked = st.selectbox("可用模型（快速选择）", available_models, index=pick_default, key="gemini_model_pick")
+        if picked != gemini_model_name:
+            st.session_state["gemini_model_name"] = picked
+            gemini_model_name = picked
+
+    ai_model = init_ai_model(gemini_model_name)
     if ai_model:
         st.success("🤖 AI 双擎提纯：已激活")
     else:
         st.error("🤖 AI 双擎提纯：离线 (需配置 GEMINI_API_KEY)")
+
+    st.markdown("---")
+    st.checkbox("🧪 显示 AI 解析调试信息", value=False, key="debug_ai_parse")
 
     st.markdown("---")
     st.write(f"📖 云端总账本记录数: **{len(history)}** 条")
@@ -337,7 +568,8 @@ with tab1:
                             "官方直达链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
                         })
                         
-                        history[f"PMC_{pmcid}"] = "✅ 已存PDF+已精读"
+                        # 只要 AI 精读完成，就应该避免下次重复花钱
+                        history[f"PMC_{pmcid}"] = f"✅ 已精读 (PDF入库状态: {pdf_uploaded})"
                         save_history(history)
                         
                         time.sleep(4.5)
@@ -408,11 +640,16 @@ with tab2:
                                 pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
                                 pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
                                 pt["💡商业一句话总结"] = ai_insights.get("AI一句话总结", "未提取")
-                                
+
+                                # 记录已完成 AI 提纯，尽量避免“上传失败 -> 下次重复提纯”
+                                history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
+
                                 time.sleep(4.5)
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
                             ai_status.text("🧠 提纯完毕！正在生成全景竞争报表...")
+                            # 先落盘历史账本，再做 CSV 生成与上传
+                            save_history(history)
                             
                             cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡商业一句话总结", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
                             df_patents = pd.DataFrame(new_patents)[cols]
@@ -429,6 +666,5 @@ with tab2:
                             if is_up:
                                 st.success(f"🎉 任务完美结束！带有 AI 商业总结的报表已推送到网盘！")
                                 os.remove(csv_path)
-                                for pt in new_patents:
-                                    history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
-                                save_history(history)
+                            else:
+                                st.warning("⚠️ CSV 上传失败：账本已先记录 AI 提纯结果，避免重复花钱。")
