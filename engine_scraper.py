@@ -68,10 +68,12 @@ def search_google_patents(query, max_results=50):
     base_url = "https://patents.google.com/xhr/query?url="
     encoded_q = urllib.parse.quote(f"q={query}&num={max_results}")
     full_url = base_url + encoded_q
+    # engine_scraper.py 的 search_google_patents 函数内
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        # 换成真实的 Windows 环境 Chrome UA，告别裸奔的 Mozilla/5.0
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "X-Requested-With": "XMLHttpRequest",
         "Referer": "https://patents.google.com/",
     }
