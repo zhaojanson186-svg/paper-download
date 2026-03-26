@@ -67,13 +67,12 @@ def upload_to_gdrive(drive_service, local_file_path, file_name, folder_id, mime_
         return False, f"上传异常: {str(e)[:50]}"
 
 # ==========================================
-# 3. 核心抓取逻辑：文献 (PMC) + 专利 (Europe PMC 全球生物库)
+# 3. 核心抓取逻辑：文献 + 专利
 # ==========================================
 def sanitize_filename(text):
     clean_text = re.sub(r'[\\/*?:"<>|]', "", text)
     return clean_text.replace(" ", "_")
 
-# --- 文献模块 ---
 def search_pmc_oa(query, max_results=5):
     oa_query = f"({query}) AND open access[filter]"
     try:
@@ -117,11 +116,8 @@ def download_pdf(pmcid, query):
     except Exception:
         return "网络异常", None, None
 
-# --- 全新专利模块：Europe PMC 接口 ---
 def search_europepmc_patents(query, max_results=50):
-    """调用专精于生命科学的 Europe PMC 接口，跨国检索(US/EP/WO)专利"""
     url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-    # SRC:PAT 强制过滤出专利数据
     params = {
         "query": f'({query}) AND SRC:PAT',
         "format": "json",
@@ -141,7 +137,7 @@ def search_europepmc_patents(query, max_results=50):
         return []
 
 # ==========================================
-# 4. 前端网页界面 (双引擎架构)
+# 4. 前端网页界面
 # ==========================================
 st.set_page_config(page_title="商业与学术情报终端", layout="wide", page_icon="🌐")
 
@@ -150,7 +146,6 @@ st.markdown("集开源文献直传与专利雷达于一体，您的云端科研�
 
 history = load_history()
 
-# --- 侧边栏 ---
 with st.sidebar:
     st.header("⚙️ 全局存储配置")
     gdrive_folder_id = st.text_input("📁 Google Drive 文件夹 ID", placeholder="粘贴你的文件夹ID")
@@ -164,12 +159,8 @@ with st.sidebar:
         time.sleep(1)
         st.rerun()
 
-# --- 构建双标签页 ---
 tab1, tab2 = st.tabs(["📄 核心文献全自动抓取", "💡 全球抗体专利雷达 (EBI)"])
 
-# ========================================================
-# 引擎 1：文献抓取
-# ========================================================
 with tab1:
     st.markdown("### 🧬 学术前沿直达")
     query_paper = st.text_input("输入检索关键词 (靶点/适应症)", value="CD3 bispecific antibody", key="q_paper")
@@ -225,9 +216,6 @@ with tab1:
                         status_text.text("文献任务完成！")
                         st.dataframe(pd.DataFrame(report_data), use_container_width=True)
 
-# ========================================================
-# 引擎 2：全球抗体专利雷达 (Europe PMC)
-# ========================================================
 with tab2:
     st.markdown("### 💡 核心技术壁垒与竞争对手挖掘")
     st.info("系统将检索全球生命科学专利库(包含美国、欧洲、WIPO)，生成 Excel 商业情报报表并推送网盘。")
@@ -259,22 +247,36 @@ with tab2:
                             pub_date = p.get("firstPublicationDate", "未知")
                             abstract = p.get("abstractText", "无摘要")
                             
-                            # 深度提取公司名称 (Assignee)
-                            assignees = "未公开/个人"
+                            # --- 核心修复：多重降维暴力提取申请人/公司 ---
+                            org_str = ""
+                            
+                            # 1. 尝试找专属 assignee 字段
                             if "patentDetails" in p and "assigneeList" in p["patentDetails"]:
                                 assignee_data = p["patentDetails"]["assigneeList"].get("assignee", [])
                                 if isinstance(assignee_data, list):
-                                    assignees = "、".join(assignee_data)
+                                    org_str = "、".join([str(a) for a in assignee_data])
                                 elif isinstance(assignee_data, str):
-                                    assignees = assignee_data
+                                    org_str = assignee_data
+                                    
+                            # 2. 找不到专属字段，直接抓取 authorString (含公司及发明人)
+                            if not org_str and "authorString" in p:
+                                org_str = p["authorString"]
+                                
+                            # 3. 连 authorString 也没有，去 authorList 里强行遍历
+                            if not org_str and "authorList" in p:
+                                authors = p["authorList"].get("author", [])
+                                if isinstance(authors, list):
+                                    org_str = "、".join([a.get("fullName", "") for a in authors if isinstance(a, dict)])
                             
-                            # 统一生成 Google Patents 的直达链接，兼容各种国家代号
+                            if not org_str or org_str.strip() == "":
+                                org_str = "未公开"
+                            
                             google_patent_url = f"https://patents.google.com/patent/{p_num}"
                             
                             patent_report.append({
                                 "全球公开号": p_num,
                                 "公开日期": pub_date,
-                                "申请人 / 拥有公司": assignees,
+                                "申请公司 / 发明人": org_str, # 列名稍微改一下，更严谨
                                 "专利名称": title,
                                 "核心摘要": abstract,
                                 "直达阅读链接": google_patent_url
