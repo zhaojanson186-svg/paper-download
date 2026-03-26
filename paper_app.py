@@ -147,11 +147,8 @@ with tab2:
                 drive_service, err = get_gdrive_service(gcp_token)
                 if not drive_service:
                     st.error(f"网盘授权失败: {err}")
-                else:
-                    # 把这行：
-# patents = search_google_patents(query_patent, max_patents)
-# 改成下面这行：
-patents = search_europe_pmc_patents(query_patent, max_patents)
+                else: 
+                    patents = search_europe_pmc_patents(query_patent, max_patents)
                     
                     if not patents:
                         debug = get_last_patent_fetch_debug()
