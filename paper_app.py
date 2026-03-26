@@ -14,6 +14,7 @@ import re
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError  # 新增：专门用于捕获谷歌的详细报错
 
 # ==========================================
 # 1. 配置区与历史记录系统
@@ -39,13 +40,12 @@ def save_history(history):
         json.dump(history, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 2. Google Drive 上传引擎 (增强版)
+# 2. Google Drive 上传引擎 (深度诊断版)
 # ==========================================
 def upload_to_gdrive(local_file_path, file_name, folder_id):
-    """将下载好的 PDF 闪电推送到谷歌网盘"""
+    """将下载好的 PDF 闪电推送到谷歌网盘，并解析详细错误"""
     try:
         raw_key = st.secrets["GCP_KEY"]
-        # 核心修复：strict=False 允许 JSON 字符串中包含真实的换行符和控制字符
         key_dict = json.loads(raw_key, strict=False) 
         
         creds = service_account.Credentials.from_service_account_info(key_dict)
@@ -60,8 +60,25 @@ def upload_to_gdrive(local_file_path, file_name, folder_id):
             fields='id'
         ).execute()
         return True, file.get('id')
+        
+    except HttpError as error:
+        # 核心改动：把谷歌原汁原味的报错信息提取出来
+        try:
+            error_content = json.loads(error.content.decode('utf-8'))
+            error_message = error_content.get('error', {}).get('message', str(error))
+        except:
+            error_message = str(error)
+            
+        # 翻译几个最常见的错误
+        if "File not found" in error_message:
+            return False, "找不到文件夹！请检查 ID 是否正确，且是否已将机器人设为编辑者。"
+        elif "Google Drive API has not been used" in error_message:
+            return False, "Google Drive API 未启用！请去 Google Cloud 控制台点击启用。"
+            
+        return False, f"谷歌服务器拒绝: {error_message}"
+        
     except json.JSONDecodeError as e:
-        return False, f"密钥格式错误(请检查Secrets配置): {str(e)}"
+        return False, f"密钥格式错误: {str(e)}"
     except Exception as e:
         return False, f"网盘连接报错: {type(e).__name__}"
 
@@ -171,16 +188,14 @@ if st.button("🚀 开始极速抓取并上传", type="primary"):
                     upload_status = "未触发"
                     
                     if status == "下载成功":
-                        # 触发网盘上传
                         is_uploaded, msg = upload_to_gdrive(local_path, file_name, gdrive_folder_id)
                         if is_uploaded:
                             upload_status = "✅ 成功推送到网盘"
                             st.success(f"☁️ {file_name} -> 已保存到网盘")
-                            os.remove(local_path) # 成功后清理云端空间
+                            os.remove(local_path)
                         else:
-                            upload_status = f"上传报错: {msg[:30]}"
-                            # 明确展示是哪个文件上传失败
-                            st.error(f"❌ {file_name} 上传失败: {msg}") 
+                            upload_status = f"上传报错: {msg[:60]}" # 展示更长的报错信息
+                            st.error(f"❌ {file_name} 上传失败: {msg}")
                     else:
                         st.warning(f"⚠️ PMC{pmcid} - {status}")
 
