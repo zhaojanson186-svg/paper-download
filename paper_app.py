@@ -10,7 +10,7 @@ import pandas as pd
 import json
 import re
 
-# 新增：Google Drive 官方库
+# Google Drive 官方库
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -39,28 +39,31 @@ def save_history(history):
         json.dump(history, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 2. Google Drive 上传引擎
+# 2. Google Drive 上传引擎 (增强版)
 # ==========================================
 def upload_to_gdrive(local_file_path, file_name, folder_id):
     """将下载好的 PDF 闪电推送到谷歌网盘"""
     try:
-        # 从 Streamlit 云端机密环境变量中读取 JSON 钥匙
-        key_dict = json.loads(st.secrets["GCP_KEY"])
+        raw_key = st.secrets["GCP_KEY"]
+        # 核心修复：strict=False 允许 JSON 字符串中包含真实的换行符和控制字符
+        key_dict = json.loads(raw_key, strict=False) 
+        
         creds = service_account.Credentials.from_service_account_info(key_dict)
         drive_service = build('drive', 'v3', credentials=creds)
         
         file_metadata = {'name': file_name, 'parents': [folder_id]}
         media = MediaFileUpload(local_file_path, mimetype='application/pdf')
         
-        # 执行云端到云端的极速写入
         file = drive_service.files().create(
             body=file_metadata, 
             media_body=media, 
             fields='id'
         ).execute()
         return True, file.get('id')
+    except json.JSONDecodeError as e:
+        return False, f"密钥格式错误(请检查Secrets配置): {str(e)}"
     except Exception as e:
-        return False, str(e)
+        return False, f"网盘连接报错: {type(e).__name__}"
 
 # ==========================================
 # 3. 核心抓取逻辑
@@ -164,21 +167,20 @@ if st.button("🚀 开始极速抓取并上传", type="primary"):
                 for i, pmcid in enumerate(new_pmc_ids):
                     status_text.text(f"正在处理: PMC{pmcid} ({i+1}/{len(new_pmc_ids)})")
                     
-                    # 1. 下载到云端服务器
                     status, local_path, file_name = download_pdf(pmcid, query)
                     upload_status = "未触发"
                     
-                    # 2. 如果下载成功，立即推送到 Google Drive
                     if status == "下载成功":
+                        # 触发网盘上传
                         is_uploaded, msg = upload_to_gdrive(local_path, file_name, gdrive_folder_id)
                         if is_uploaded:
                             upload_status = "✅ 成功推送到网盘"
                             st.success(f"☁️ {file_name} -> 已保存到网盘")
-                            # 上传完就可以删掉云端服务器的本地文件，节省空间
-                            os.remove(local_path) 
+                            os.remove(local_path) # 成功后清理云端空间
                         else:
-                            upload_status = f"❌ 上传失败: {msg[:30]}"
-                            st.error(upload_status)
+                            upload_status = f"上传报错: {msg[:30]}"
+                            # 明确展示是哪个文件上传失败
+                            st.error(f"❌ {file_name} 上传失败: {msg}") 
                     else:
                         st.warning(f"⚠️ PMC{pmcid} - {status}")
 
