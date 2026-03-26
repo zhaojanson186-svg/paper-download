@@ -65,6 +65,9 @@ def list_available_gemini_models(max_items: int = 50):
     返回值：list[str]
     """
     try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
         api_models = genai.list_models()
         # 兼容 generator / list
         out = []
@@ -472,28 +475,18 @@ with st.sidebar:
     gdrive_folder_id = st.text_input("📁 Google Drive 文件夹 ID", placeholder="粘贴你的文件夹ID")
     st.markdown("---")
     
-    if "gemini_model_name" not in st.session_state:
-        st.session_state["gemini_model_name"] = "gemini-1.5-flash-latest"
-
     st.caption("用于 Gemini API 的模型 id（Google AI Studio 可用的 model 名称）")
-    gemini_model_name = st.text_input("🤖 Gemini model id", key="gemini_model_name")
+    gemini_model_name = st.text_input("🤖 Gemini model id", value="gemini-1.5-flash-latest")
 
     if st.button("🔄 刷新可用模型列表", type="secondary"):
         with st.spinner("正在拉取可用模型列表..."):
             models = list_available_gemini_models(max_items=50)
-        st.session_state["available_gemini_models"] = models
         if models:
-            st.success(f"获取到 {len(models)} 个模型：请从下方选择或手动修改。")
+            st.success(f"获取到 {len(models)} 个模型：请从列表里手动复制到上面的 model id 输入框。")
         else:
             st.warning("未能获取模型列表（可能是 SDK/权限限制/网络原因）。仍可手动填写 model id。")
-
-    available_models = st.session_state.get("available_gemini_models") or []
-    if available_models:
-        pick_default = available_models.index(gemini_model_name) if gemini_model_name in available_models else 0
-        picked = st.selectbox("可用模型（快速选择）", available_models, index=pick_default, key="gemini_model_pick")
-        if picked != gemini_model_name:
-            st.session_state["gemini_model_name"] = picked
-            gemini_model_name = picked
+        if models:
+            st.expander("可用模型列表（复制其中一个）").code("\n".join(models))
 
     ai_model = init_ai_model(gemini_model_name)
     if ai_model:
