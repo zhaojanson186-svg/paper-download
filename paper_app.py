@@ -3,10 +3,12 @@ import os
 import time
 import pandas as pd
 
-from config import HISTORY_FILE, DOWNLOAD_DIR, load_history, save_history, sanitize_filename
+# 从 config 中只保留需要的目录和工具函数（彻底弃用本地历史账本函数）
+from config import DOWNLOAD_DIR, sanitize_filename
 from engine_ai import init_ai_model, list_available_gemini_models, analyze_paper_with_ai, analyze_patent_with_ai
-from engine_gdrive import get_gdrive_service, upload_to_gdrive
-# 把原来的导入替换为：
+
+# 导入底层引擎和新增的云端账本函数
+from engine_gdrive import get_gdrive_service, upload_to_gdrive, get_cloud_history, update_cloud_history
 from engine_scraper import search_pmc_oa, download_pdf, fetch_pmc_metadata, search_europe_pmc_patents, get_last_patent_fetch_debug
 
 st.set_page_config(page_title="双擎 AI 情报终端", layout="wide", page_icon="🧠")
@@ -14,7 +16,15 @@ st.set_page_config(page_title="双擎 AI 情报终端", layout="wide", page_icon
 st.title("🧠 药物研发 AI 全景情报终端")
 st.markdown("文献精读与专利防线双向覆盖。自动抓取、LLM 智能提纯、去重并直传云盘。")
 
-history = load_history()
+# ==========================================
+# 初始化系统级 Session State（状态缓存）
+# ==========================================
+if 'cloud_history' not in st.session_state:
+    st.session_state['cloud_history'] = {}
+if 'history_file_id' not in st.session_state:
+    st.session_state['history_file_id'] = None
+if 'is_history_loaded' not in st.session_state:
+    st.session_state['is_history_loaded'] = False
 
 # ==========================================
 # 侧边栏：配置与状态
@@ -29,6 +39,17 @@ with st.sidebar:
     # 动态获取密钥以解耦引擎
     gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")
     gcp_token = st.secrets.get("GCP_TOKEN", "")
+
+    # 🥇 核心动作：当密钥和文件夹ID都有了，自动从网盘拉取历史账本
+    if gcp_token and gdrive_folder_id and not st.session_state['is_history_loaded']:
+        drive_service, _ = get_gdrive_service(gcp_token)
+        if drive_service:
+            with st.spinner("正在同步云端历史账本..."):
+                h_data, h_id = get_cloud_history(drive_service, gdrive_folder_id)
+                st.session_state['cloud_history'] = h_data
+                st.session_state['history_file_id'] = h_id
+                st.session_state['is_history_loaded'] = True
+                st.success("云端账本挂载成功！")
 
     if st.button("🔄 刷新可用模型列表", type="secondary"):
         with st.spinner("正在拉取可用模型列表..."):
@@ -47,11 +68,25 @@ with st.sidebar:
 
     st.markdown("---")
     debug_mode = st.checkbox("🧪 显示 AI 解析调试信息", value=False, key="debug_ai_parse")
-    st.write(f"📖 云端总账本记录数: **{len(history)}** 条")
+    
+    # 显示内存中的账本数量
+    st.write(f"📖 云端总账本记录数: **{len(st.session_state['cloud_history'])}** 条")
+    
     if st.button("🗑️ 清空历史记录", type="secondary"):
-        if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
-        st.success("账本已彻底重置！")
-        time.sleep(1)
+        # 如果网盘里有这个文件，直接物理删除
+        if st.session_state['history_file_id']:
+            drive_srv, _ = get_gdrive_service(gcp_token)
+            if drive_srv:
+                try:
+                    drive_srv.files().delete(fileId=st.session_state['history_file_id']).execute()
+                except:
+                    pass
+        # 释放内存状态
+        st.session_state['cloud_history'] = {}
+        st.session_state['history_file_id'] = None
+        st.session_state['is_history_loaded'] = False
+        st.success("云端账本已彻底物理销毁！下次任务将重新生成。")
+        time.sleep(1.5)
         st.rerun()
 
 tab1, tab2 = st.tabs(["📄 核心文献直传 + AI 精读", "💡 专利雷达 + AI 构型拆解"])
@@ -76,6 +111,7 @@ with tab1:
             if not drive_service:
                 st.error(f"网盘授权失败: {err}")
             else:
+                history = st.session_state['cloud_history']
                 all_pmc_ids = search_pmc_oa(query_paper, max_papers)
                 new_pmc_ids = [pid for pid in all_pmc_ids if f"PMC_{pid}" not in history]
                 
@@ -110,8 +146,12 @@ with tab1:
                             "官方直达链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
                         })
                         
+                        # 🥇 核心动作：把单条记录覆盖更新到 Google Drive
                         history[f"PMC_{pmcid}"] = f"✅ 已精读 (PDF入库状态: {pdf_uploaded})"
-                        save_history(history)
+                        st.session_state['cloud_history'] = history
+                        st.session_state['history_file_id'] = update_cloud_history(
+                            drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id']
+                        )
                         
                         time.sleep(4.5) # 防封限速红线
                         progress_bar.progress((i + 1) / len(new_pmc_ids))
@@ -154,6 +194,7 @@ with tab2:
                         debug = get_last_patent_fetch_debug()
                         st.warning(f"⚠️ 未能抓取到专利数据（HTTP {debug.get('status_code', '未知')}）。请稍等后重试。")
                     else:
+                        history = st.session_state['cloud_history']
                         new_patents = [pt for pt in patents if f"PAT_{pt['全球公开号']}" not in history]
                         
                         if not new_patents:
@@ -177,7 +218,12 @@ with tab2:
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
                             ai_status.text("🧠 提纯完毕！正在生成全景竞争报表...")
-                            save_history(history)
+                            
+                            # 🥇 核心动作：循环结束后，将专利账本覆盖更新到 Google Drive
+                            st.session_state['cloud_history'] = history
+                            st.session_state['history_file_id'] = update_cloud_history(
+                                drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id']
+                            )
                             
                             cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡商业一句话总结", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
                             df_patents = pd.DataFrame(new_patents)[cols]
