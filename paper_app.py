@@ -3,11 +3,10 @@ import os
 import time
 import pandas as pd
 
-# 从 config 中只保留需要的目录和工具函数（彻底弃用本地历史账本函数）
 from config import DOWNLOAD_DIR, sanitize_filename
 from engine_ai import init_ai_model, list_available_gemini_models, analyze_paper_with_ai, analyze_patent_with_ai
 
-# 导入底层引擎和新增的云端账本函数
+# 导入底层引擎和云端账本函数
 from engine_gdrive import get_gdrive_service, upload_to_gdrive, get_cloud_history, update_cloud_history
 from engine_scraper import search_pmc_oa, download_pdf, fetch_pmc_metadata, search_europe_pmc_patents, get_last_patent_fetch_debug
 
@@ -36,11 +35,9 @@ with st.sidebar:
     
     gemini_model_name = st.text_input("🤖 Gemini model id", value="gemini-1.5-flash-latest")
     
-    # 动态获取密钥以解耦引擎
     gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")
     gcp_token = st.secrets.get("GCP_TOKEN", "")
 
-    # 🥇 核心动作：当密钥和文件夹ID都有了，自动从网盘拉取历史账本
     if gcp_token and gdrive_folder_id and not st.session_state['is_history_loaded']:
         drive_service, _ = get_gdrive_service(gcp_token)
         if drive_service:
@@ -69,11 +66,9 @@ with st.sidebar:
     st.markdown("---")
     debug_mode = st.checkbox("🧪 显示 AI 解析调试信息", value=False, key="debug_ai_parse")
     
-    # 显示内存中的账本数量
     st.write(f"📖 云端总账本记录数: **{len(st.session_state['cloud_history'])}** 条")
     
     if st.button("🗑️ 清空历史记录", type="secondary"):
-        # 如果网盘里有这个文件，直接物理删除
         if st.session_state['history_file_id']:
             drive_srv, _ = get_gdrive_service(gcp_token)
             if drive_srv:
@@ -81,7 +76,6 @@ with st.sidebar:
                     drive_srv.files().delete(fileId=st.session_state['history_file_id']).execute()
                 except:
                     pass
-        # 释放内存状态
         st.session_state['cloud_history'] = {}
         st.session_state['history_file_id'] = None
         st.session_state['is_history_loaded'] = False
@@ -126,10 +120,7 @@ with tab1:
                     for i, pmcid in enumerate(new_pmc_ids):
                         status_text.text(f"🤖 处理第 {i+1}/{len(new_pmc_ids)} 篇 (PMC{pmcid})...")
                         
-                      for i, pmcid in enumerate(new_pmc_ids):
-                        status_text.text(f"🤖 处理第 {i+1}/{len(new_pmc_ids)} 篇 (PMC{pmcid})...")
-                        
-                        # ================= 替换从这里开始 =================
+                        # ---------------- 核心照妖镜补丁 ----------------
                         status, local_path, file_name = download_pdf(pmcid, query_paper)
                         pdf_uploaded = "未上传"
                         
@@ -139,16 +130,13 @@ with tab1:
                                 pdf_uploaded = "✅ 原文已入库"
                             else:
                                 pdf_uploaded = "❌ 网盘上传失败"
-                                st.error(f"⚠️ PMC{pmcid} 传网盘失败: {err_msg}") # 让网盘报错显形
+                                st.error(f"⚠️ PMC{pmcid} 传网盘失败: {err_msg}")
                             os.remove(local_path)
                         else:
                             pdf_uploaded = f"❌ 下载失败: {status}"
-                            st.warning(f"🚫 PMC{pmcid} 原文下载失败: {status} (可能是云端 IP 被官方拦截)") # 让下载报错显形
-                        # ================= 替换到这里结束 =================
+                            st.warning(f"🚫 PMC{pmcid} 原文下载失败: {status} (可能是云端 IP 被官方拦截)")
+                        # ------------------------------------------------
 
-                        title, abstract = fetch_pmc_metadata(pmcid)
-                        # 下面的代码保持不变...
-                        
                         title, abstract = fetch_pmc_metadata(pmcid)
                         ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
                         
@@ -162,14 +150,13 @@ with tab1:
                             "官方直达链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
                         })
                         
-                        # 🥇 核心动作：把单条记录覆盖更新到 Google Drive
                         history[f"PMC_{pmcid}"] = f"✅ 已精读 (PDF入库状态: {pdf_uploaded})"
                         st.session_state['cloud_history'] = history
                         st.session_state['history_file_id'] = update_cloud_history(
                             drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id']
                         )
                         
-                        time.sleep(4.5) # 防封限速红线
+                        time.sleep(4.5) 
                         progress_bar.progress((i + 1) / len(new_pmc_ids))
                         
                     status_text.text("🧠 所有文献精读完毕！正在推送总报表...")
@@ -230,12 +217,11 @@ with tab2:
 
                                 history[f"PAT_{pt['全球公开号']}"] = "✅ 已AI提纯"
                                 
-                                time.sleep(6.0) # 防封限速红线
+                                time.sleep(6.0)
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
                             ai_status.text("🧠 提纯完毕！正在生成全景竞争报表...")
                             
-                            # 🥇 核心动作：循环结束后，将专利账本覆盖更新到 Google Drive
                             st.session_state['cloud_history'] = history
                             st.session_state['history_file_id'] = update_cloud_history(
                                 drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id']
