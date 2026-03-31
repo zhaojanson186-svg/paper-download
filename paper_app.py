@@ -29,7 +29,7 @@ with st.sidebar:
     gdrive_folder_id = st.text_input("📁 Google Drive 文件夹 ID", placeholder="粘贴你的文件夹ID")
     st.markdown("---")
     
-    gemini_model_name = st.text_input("🤖 初始 Gemini 模型", value="gemini-1.5-flash-latest")
+    gemini_model_name = st.text_input("🤖 初始 Gemini 模型", value="gemini-2.0-flash")
     gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")
     gcp_token = st.secrets.get("GCP_TOKEN", "")
 
@@ -136,35 +136,28 @@ with tab1:
                         title, abstract = fetch_pmc_metadata(pmcid)
                         
                         # ========================================================
-                        # 终极版拦截网：加入 400 和 解析报错
+                        # 【极速版】AI 无缝换弹：一击不中，立刻换枪！
                         # ========================================================
                         ai_insights = {}
                         while current_model_idx < len(model_chain):
-                            success = False
-                            for attempt in range(3):
-                                ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
-                                error_check = str(ai_insights).lower()
-                                
-                                # 将 400 和 error 也加入黑名单
-                                if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
-                                    success = True
-                                    break 
-                                    
-                                st.warning(f"⚠️ [{model_chain[current_model_idx]}] 触发报错/限流，冷静 10 秒... (第 {attempt+1}/3 次重试)")
-                                time.sleep(10.0)
-                                
-                            if success:
+                            ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
+                            error_check = str(ai_insights).lower()
+                            
+                            # 没报错就直接跳出，正常录入表格
+                            if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
                                 break 
+                                
+                            # 一旦报错，无需等待，立刻抛弃当前模型，切换下一个
+                            current_model_idx += 1
+                            if current_model_idx < len(model_chain):
+                                new_model = model_chain[current_model_idx]
+                                st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} 🚀")
+                                ai_model = init_ai_model(gemini_api_key, new_model)
+                                time.sleep(0.5) # 给新模型留0.5秒切换时间
                             else:
-                                current_model_idx += 1
-                                if current_model_idx < len(model_chain):
-                                    new_model = model_chain[current_model_idx]
-                                    st.error(f"🔴 当前模型异常或耗尽！自动无缝切换至备用模型: {new_model} 🚀")
-                                    ai_model = init_ai_model(gemini_api_key, new_model)
-                                else:
-                                    st.error("❌ 所有备用模型均无法解析！请检查 API 密钥或明天再试。")
-                                    ai_insights = {"靶点组合": "解析彻底失败", "AI核心结论": "解析彻底失败", "实验模型": "无"}
-                                    break
+                                st.error("❌ 弹夹打空！所有备用模型均无法解析。")
+                                ai_insights = {"靶点组合": "解析彻底失败", "AI核心结论": "解析彻底失败", "实验模型": "无"}
+                                break
                         # ========================================================
                         
                         paper_report_data.append({
@@ -242,34 +235,26 @@ with tab2:
                                 ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
                                 
                                 # ========================================================
-                                # 终极版拦截网 (专利区)
+                                # 【极速版】AI 无缝换弹 (专利区)
                                 # ========================================================
                                 ai_insights = {}
                                 while current_model_idx < len(model_chain):
-                                    success = False
-                                    for attempt in range(3):
-                                        ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
-                                        error_check = str(ai_insights).lower()
-                                        
-                                        if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
-                                            success = True
-                                            break
-                                            
-                                        st.warning(f"⚠️ [{model_chain[current_model_idx]}] 触发报错/限流，冷静 10 秒... (第 {attempt+1}/3 次重试)")
-                                        time.sleep(10.0)
-                                        
-                                    if success:
+                                    ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
+                                    error_check = str(ai_insights).lower()
+                                    
+                                    if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
                                         break
+                                        
+                                    current_model_idx += 1
+                                    if current_model_idx < len(model_chain):
+                                        new_model = model_chain[current_model_idx]
+                                        st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} 🚀")
+                                        ai_model = init_ai_model(gemini_api_key, new_model)
+                                        time.sleep(0.5)
                                     else:
-                                        current_model_idx += 1
-                                        if current_model_idx < len(model_chain):
-                                            new_model = model_chain[current_model_idx]
-                                            st.error(f"🔴 当前模型异常或耗尽！自动无缝切换至备用模型: {new_model} 🚀")
-                                            ai_model = init_ai_model(gemini_api_key, new_model)
-                                        else:
-                                            st.error("❌ 所有备用模型均无法解析！请检查 API 密钥或明天再试。")
-                                            ai_insights = {"靶点组合": "解析彻底失败", "AI一句话总结": "解析彻底失败", "抗体构型": "无"}
-                                            break
+                                        st.error("❌ 弹夹打空！所有备用模型均无法解析。")
+                                        ai_insights = {"靶点组合": "解析彻底失败", "AI一句话总结": "解析彻底失败", "抗体构型": "无"}
+                                        break
                                 # ========================================================
 
                                 pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
