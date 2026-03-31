@@ -198,10 +198,24 @@ with tab2:
                             ai_progress = st.progress(0)
                             ai_status = st.empty()
                             
-                            for idx, pt in enumerate(new_patents):
+                           for idx, pt in enumerate(new_patents):
                                 ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
-                                ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
                                 
+                                # ================= 新增：大模型 429 限流自动重试机制 =================
+                                max_retries = 3
+                                ai_insights = {}
+                                for attempt in range(max_retries):
+                                    ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
+                                    
+                                    # 检查 AI 返回的结果里有没有包含 429 报错关键字
+                                    error_check_str = str(ai_insights.get("靶点组合", "")) + str(ai_insights.get("AI一句话总结", ""))
+                                    if "429" not in error_check_str and "ResourceExhausted" not in error_check_str:
+                                        break # 如果没有报错，跳出重试循环，继续往下走
+                                        
+                                    st.warning(f"⚠️ 触发 Gemini 限流红线，进入冷静期 10 秒... (第 {attempt+1}/{max_retries} 次重试)")
+                                    time.sleep(10.0) # 被限流了就老老实实多等一会儿
+                                # =====================================================================
+
                                 pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
                                 pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
                                 pt["💡商业一句话总结"] = ai_insights.get("AI一句话总结", "未提取")
@@ -227,7 +241,8 @@ with tab2:
 
                                 history[f"PAT_{pt['全球公开号']}"] = f"✅ 已AI提纯 ({txt_uploaded})"
                                 
-                                time.sleep(6.0)
+                                # 正常的循环等待时间，我们稍微拉长一点点，更加稳妥
+                                time.sleep(6.5)
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
                             st.session_state['cloud_history'] = history
