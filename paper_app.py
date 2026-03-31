@@ -82,7 +82,6 @@ with st.sidebar:
 # 构建备用模型弹夹 (Model Chain)
 # ---------------------------------------------------------
 fallback_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-1.5-flash"]
-# 确保初始模型在第一位，且后续列表不重复
 model_chain = [gemini_model_name] + [m for m in fallback_models if m != gemini_model_name]
 
 
@@ -112,7 +111,6 @@ with tab1:
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
-                    # 实时刷新容器
                     result_container = st.empty() 
                     paper_report_data = []
                     current_model_idx = 0
@@ -139,17 +137,18 @@ with tab1:
                         title, abstract = fetch_pmc_metadata(pmcid)
                         
                         # ========================================================
-                        # AI 无缝自动换模型装甲 (文献区)
+                        # 【升级版】AI 无缝换模型装甲 (文献区) - 全字典扫描
                         # ========================================================
                         ai_insights = {}
                         while current_model_idx < len(model_chain):
                             success = False
                             for attempt in range(3):
                                 ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
-                                error_check = str(ai_insights.get("靶点组合", "")) + str(ai_insights.get("AI核心结论", ""))
                                 
-                                # 检查是否触发了限流或额度耗尽
-                                if "429" not in error_check and "quota" not in error_check.lower() and "ResourceExhausted" not in error_check:
+                                # 将整个字典强行转为小写字符串，地毯式搜索报错关键字
+                                error_check = str(ai_insights).lower()
+                                
+                                if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500"]):
                                     success = True
                                     break 
                                     
@@ -157,9 +156,8 @@ with tab1:
                                 time.sleep(10.0)
                                 
                             if success:
-                                break # 成功提取，跳出换弹夹循环
+                                break 
                             else:
-                                # 当前模型 3 次全部失败，判定为额度榨干，开始换弹！
                                 current_model_idx += 1
                                 if current_model_idx < len(model_chain):
                                     new_model = model_chain[current_model_idx]
@@ -167,6 +165,7 @@ with tab1:
                                     ai_model = init_ai_model(gemini_api_key, new_model)
                                 else:
                                     st.error("❌ 所有备用模型的每日免费额度均已耗尽！请明天再试。")
+                                    ai_insights = {"靶点组合": "解析失败: 额度耗尽", "AI核心结论": "解析失败: 额度耗尽", "实验模型": "无"}
                                     break
                         # ========================================================
                         
@@ -180,7 +179,6 @@ with tab1:
                             "官方链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
                         })
                         
-                        # 实时刷新网页表格和账本总数
                         result_container.dataframe(pd.DataFrame(paper_report_data), column_config={"官方链接": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
                         
                         history[f"PMC_{pmcid}"] = f"✅ 已精读 ({pdf_uploaded})"
@@ -188,10 +186,9 @@ with tab1:
                         st.session_state['history_file_id'] = update_cloud_history(drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id'])
                         record_count_placeholder.write(f"📖 云端总账本记录数: **{len(history)}** 条")
                         
-                        time.sleep(1.0) # 已加速
+                        time.sleep(1.0)
                         progress_bar.progress((i + 1) / len(new_pmc_ids))
                         
-                    # 导出最终报表
                     if paper_report_data:
                         df_papers = pd.DataFrame(paper_report_data)
                         csv_name = f"{sanitize_filename(query_paper)}_Paper_AI_Report_{time.strftime('%m%d_%H%M')}.csv"
@@ -247,16 +244,17 @@ with tab2:
                                 ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
                                 
                                 # ========================================================
-                                # 专利区 AI 无缝自动换模型装甲
+                                # 【升级版】AI 无缝换模型装甲 (专利区) - 全字典扫描
                                 # ========================================================
                                 ai_insights = {}
                                 while current_model_idx < len(model_chain):
                                     success = False
                                     for attempt in range(3):
                                         ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
-                                        error_check = str(ai_insights.get("靶点组合", "")) + str(ai_insights.get("AI一句话总结", ""))
                                         
-                                        if "429" not in error_check and "quota" not in error_check.lower() and "ResourceExhausted" not in error_check:
+                                        error_check = str(ai_insights).lower()
+                                        
+                                        if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500"]):
                                             success = True
                                             break
                                             
@@ -273,6 +271,7 @@ with tab2:
                                             ai_model = init_ai_model(gemini_api_key, new_model)
                                         else:
                                             st.error("❌ 所有备用模型的每日免费额度均已耗尽！请明天再试。")
+                                            ai_insights = {"靶点组合": "解析失败: 额度耗尽", "AI一句话总结": "解析失败: 额度耗尽", "抗体构型": "无"}
                                             break
                                 # ========================================================
 
@@ -297,7 +296,6 @@ with tab2:
                                 pt["正文状态"] = txt_uploaded
                                 refined_patent_data.append(pt)
                                 
-                                # 实时刷新表格和账本计数
                                 cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡商业一句话总结", "正文状态", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
                                 df_disp = pd.DataFrame(refined_patent_data)[cols]
                                 result_container_pat.dataframe(df_disp, column_config={"直达阅读链接": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
@@ -307,10 +305,9 @@ with tab2:
                                 st.session_state['history_file_id'] = update_cloud_history(drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id'])
                                 record_count_placeholder.write(f"📖 云端总账本记录数: **{len(history)}** 条")
                                 
-                                time.sleep(1.0) # 已加速
+                                time.sleep(1.0) 
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
-                            # 导出最终专利报表
                             if refined_patent_data:
                                 csv_name = f"{sanitize_filename(query_patent)}_Patent_AI_Report_{time.strftime('%m%d_%H%M')}.csv"
                                 csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
