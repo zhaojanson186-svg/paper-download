@@ -126,12 +126,28 @@ with tab1:
                     for i, pmcid in enumerate(new_pmc_ids):
                         status_text.text(f"🤖 处理第 {i+1}/{len(new_pmc_ids)} 篇 (PMC{pmcid})...")
                         
+                      for i, pmcid in enumerate(new_pmc_ids):
+                        status_text.text(f"🤖 处理第 {i+1}/{len(new_pmc_ids)} 篇 (PMC{pmcid})...")
+                        
+                        # ================= 替换从这里开始 =================
                         status, local_path, file_name = download_pdf(pmcid, query_paper)
                         pdf_uploaded = "未上传"
+                        
                         if status == "下载成功":
-                            is_up, _ = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id)
-                            pdf_uploaded = "✅ 原文已入库" if is_up else "❌ 上传失败"
+                            is_up, err_msg = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id)
+                            if is_up:
+                                pdf_uploaded = "✅ 原文已入库"
+                            else:
+                                pdf_uploaded = "❌ 网盘上传失败"
+                                st.error(f"⚠️ PMC{pmcid} 传网盘失败: {err_msg}") # 让网盘报错显形
                             os.remove(local_path)
+                        else:
+                            pdf_uploaded = f"❌ 下载失败: {status}"
+                            st.warning(f"🚫 PMC{pmcid} 原文下载失败: {status} (可能是云端 IP 被官方拦截)") # 让下载报错显形
+                        # ================= 替换到这里结束 =================
+
+                        title, abstract = fetch_pmc_metadata(pmcid)
+                        # 下面的代码保持不变...
                         
                         title, abstract = fetch_pmc_metadata(pmcid)
                         ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
