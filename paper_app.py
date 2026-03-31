@@ -23,7 +23,6 @@ if 'history_file_id' not in st.session_state:
     st.session_state['history_file_id'] = None
 if 'is_history_loaded' not in st.session_state:
     st.session_state['is_history_loaded'] = False
-# 新增：缓存全局模型列表，防止每次点击都去拉取拖慢速度
 if 'all_available_models' not in st.session_state:
     st.session_state['all_available_models'] = []
 
@@ -82,23 +81,19 @@ with st.sidebar:
         st.rerun()
 
 # ---------------------------------------------------------
-# 构建备用模型弹夹 (Model Chain) - 无限火力版
+# 构建备用模型弹夹 (Model Chain)
 # ---------------------------------------------------------
-# 1. 自动尝试拉取账号下所有模型
 if not st.session_state['all_available_models'] and gemini_api_key:
     raw_models = list_available_gemini_models(gemini_api_key, max_items=100)
     if raw_models:
         st.session_state['all_available_models'] = raw_models
 
-# 2. 智能清洗：过滤掉明确不能做文本生成的模型（如语音、纯视觉、向量模型）
 if st.session_state['all_available_models']:
     fallback_models = [m for m in st.session_state['all_available_models'] 
                        if "tts" not in m and "embedding" not in m and "vision" not in m and "aqa" not in m]
 else:
-    # 兜底硬编码
-    fallback_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-pro"]
+    fallback_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-1.5-flash"]
 
-# 3. 组装超级弹夹：保证你填写的初始模型永远是第一发子弹
 model_chain = [gemini_model_name] + [m for m in fallback_models if m != gemini_model_name]
 
 
@@ -154,24 +149,35 @@ with tab1:
                         title, abstract = fetch_pmc_metadata(pmcid)
                         
                         # ========================================================
-                        # 加特林机枪换弹模式
+                        # 修复版的带脑子雷达：区分“超速”和“炸膛”
                         # ========================================================
                         ai_insights = {}
+                        retry_count = 0
                         while current_model_idx < len(model_chain):
                             ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
                             error_check = str(ai_insights).lower()
                             
+                            # 1. 成功解析，跳出
                             if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
                                 break 
+                            
+                            # 2. 如果是 429超速，不要换枪！原地等待 15 秒回血
+                            if ("429" in error_check or "too many requests" in error_check) and retry_count < 2:
+                                st.warning(f"⏳ 时速超过 15篇/分钟，强制深呼吸 15 秒避开监控... (重试 {retry_count+1}/2)")
+                                time.sleep(15.0)
+                                retry_count += 1
+                                continue
                                 
+                            # 3. 如果是400报错，或者429等了两次还不行，说明真出问题了，立刻换枪！
+                            retry_count = 0
                             current_model_idx += 1
                             if current_model_idx < len(model_chain):
                                 new_model = model_chain[current_model_idx]
-                                st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} ({current_model_idx}/{len(model_chain)})🚀")
+                                st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 异常，切枪至: {new_model} ({current_model_idx}/{len(model_chain)})🚀")
                                 ai_model = init_ai_model(gemini_api_key, new_model)
                                 time.sleep(0.5)
                             else:
-                                st.error("❌ 弹尽粮绝！几十个备用模型全部被打空，说明该项目的 API 额度已遭彻底封锁。")
+                                st.error("❌ 所有备用模型均无法解析，任务中止。")
                                 ai_insights = {"靶点组合": "解析彻底失败", "AI核心结论": "解析彻底失败", "实验模型": "无"}
                                 break
                         # ========================================================
@@ -193,7 +199,8 @@ with tab1:
                         st.session_state['history_file_id'] = update_cloud_history(drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id'])
                         record_count_placeholder.write(f"📖 云端总账本记录数: **{len(history)}** 条")
                         
-                        time.sleep(1.0)
+                        # 开启定速巡航，确保每篇文献处理间隔在 3.5 秒以上，彻底杜绝 429 报错！
+                        time.sleep(3.5)
                         progress_bar.progress((i + 1) / len(new_pmc_ids))
                         
                     if paper_report_data:
@@ -250,7 +257,11 @@ with tab2:
                             for idx, pt in enumerate(new_patents):
                                 ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
                                 
+                                # ========================================================
+                                # 修复版的带脑子雷达 (专利区)
+                                # ========================================================
                                 ai_insights = {}
+                                retry_count = 0
                                 while current_model_idx < len(model_chain):
                                     ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
                                     error_check = str(ai_insights).lower()
@@ -258,16 +269,24 @@ with tab2:
                                     if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
                                         break
                                         
+                                    if ("429" in error_check or "too many requests" in error_check) and retry_count < 2:
+                                        st.warning(f"⏳ 时速超过 15篇/分钟，强制深呼吸 15 秒避开监控... (重试 {retry_count+1}/2)")
+                                        time.sleep(15.0)
+                                        retry_count += 1
+                                        continue
+                                        
+                                    retry_count = 0
                                     current_model_idx += 1
                                     if current_model_idx < len(model_chain):
                                         new_model = model_chain[current_model_idx]
-                                        st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} ({current_model_idx}/{len(model_chain)})🚀")
+                                        st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 异常，切枪至: {new_model} ({current_model_idx}/{len(model_chain)})🚀")
                                         ai_model = init_ai_model(gemini_api_key, new_model)
                                         time.sleep(0.5)
                                     else:
-                                        st.error("❌ 弹尽粮绝！几十个备用模型全部被打空，说明该项目的 API 额度已遭彻底封锁。")
+                                        st.error("❌ 所有备用模型均无法解析，任务中止。")
                                         ai_insights = {"靶点组合": "解析彻底失败", "AI一句话总结": "解析彻底失败", "抗体构型": "无"}
                                         break
+                                # ========================================================
 
                                 pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
                                 pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
@@ -299,7 +318,8 @@ with tab2:
                                 st.session_state['history_file_id'] = update_cloud_history(drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id'])
                                 record_count_placeholder.write(f"📖 云端总账本记录数: **{len(history)}** 条")
                                 
-                                time.sleep(1.0) 
+                                # 开启定速巡航
+                                time.sleep(3.5) 
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
                             if refined_patent_data:
