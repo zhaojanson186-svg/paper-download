@@ -8,8 +8,8 @@ from engine_ai import init_ai_model, list_available_gemini_models, analyze_paper
 
 # 导入底层引擎和云端账本函数
 from engine_gdrive import get_gdrive_service, upload_to_gdrive, get_cloud_history, update_cloud_history
-from engine_scraper import search_pmc_oa, download_pdf, fetch_pmc_metadata, search_europe_pmc_patents, get_last_patent_fetch_debug
-
+# 把这行导入补充完整
+from engine_scraper import search_pmc_oa, download_pdf, fetch_pmc_metadata, search_europe_pmc_patents, get_last_patent_fetch_debug, download_fulltext_txt
 st.set_page_config(page_title="双擎 AI 情报终端", layout="wide", page_icon="🧠")
 
 st.title("🧠 药物研发 AI 全景情报终端")
@@ -120,26 +120,43 @@ with tab1:
                     for i, pmcid in enumerate(new_pmc_ids):
                         status_text.text(f"🤖 处理第 {i+1}/{len(new_pmc_ids)} 篇 (PMC{pmcid})...")
                         
-                        # ---------------- 核心照妖镜补丁 ----------------
+                        # ---------------- 核心：双轨下载逻辑 (PDF优先，TXT兜底) ----------------
                         status, local_path, file_name = download_pdf(pmcid, query_paper)
                         pdf_uploaded = "未上传"
                         
                         if status == "下载成功":
-                            is_up, err_msg = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id)
+                            is_up, err_msg = upload_to_gdrive(drive_service, local_path, file_name, gdrive_folder_id, 'application/pdf')
                             if is_up:
-                                pdf_uploaded = "✅ 原文已入库"
+                                pdf_uploaded = "✅ PDF已入库"
                             else:
                                 pdf_uploaded = "❌ 网盘上传失败"
                                 st.error(f"⚠️ PMC{pmcid} 传网盘失败: {err_msg}")
                             os.remove(local_path)
                         else:
-                            pdf_uploaded = f"❌ 下载失败: {status}"
-                            st.warning(f"🚫 PMC{pmcid} 原文下载失败: {status} (可能是云端 IP 被官方拦截)")
+                            st.warning(f"🚫 PMC{pmcid} 无官方PDF ({status})，正在启动 Plan B: 抓取纯文本全文...")
+                            
+                            # 触发 Plan B！
+                            txt_status, txt_path, txt_name = download_fulltext_txt(pmcid, query_paper, DOWNLOAD_DIR)
+                            
+                            if txt_status == "备用抓取成功":
+                                is_up, err_msg = upload_to_gdrive(drive_service, txt_path, txt_name, gdrive_folder_id, 'text/plain')
+                                if is_up:
+                                    pdf_uploaded = "✅ 网页TXT已入库"
+                                    st.success(f"🌟 PMC{pmcid} 网页纯文本兜底成功，已存入网盘！")
+                                else:
+                                    pdf_uploaded = "❌ TXT网盘上传失败"
+                                    st.error(f"⚠️ PMC{pmcid} TXT传网盘失败: {err_msg}")
+                                os.remove(txt_path)
+                            else:
+                                pdf_uploaded = f"❌ 彻底失败: {txt_status}"
+                                st.error(f"💀 PMC{pmcid} Plan B 也失败了: {txt_status}")
                         # ------------------------------------------------
 
+                        # 继续跑 AI 精读摘要
                         title, abstract = fetch_pmc_metadata(pmcid)
                         ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
                         
+                        # 剩下的组装报表和写历史账本逻辑保持不变...
                         paper_report_data.append({
                             "文献编号": f"PMC{pmcid}",
                             "🎯核心靶点": ai_insights.get("靶点组合", ""),
@@ -150,7 +167,7 @@ with tab1:
                             "官方直达链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
                         })
                         
-                        history[f"PMC_{pmcid}"] = f"✅ 已精读 (PDF入库状态: {pdf_uploaded})"
+                        history[f"PMC_{pmcid}"] = f"✅ 已精读 (网盘状态: {pdf_uploaded})"
                         st.session_state['cloud_history'] = history
                         st.session_state['history_file_id'] = update_cloud_history(
                             drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id']
