@@ -50,6 +50,14 @@ def extract_json_object(text: str):
                 return candidate.strip()
     return None
 
+# ==========================================
+# 把我不小心弄丢的 safe_truncate 找回来了！
+# ==========================================
+def safe_truncate(text: str, limit: int = 800):
+    if text is None: return ""
+    text = str(text)
+    return text if len(text) <= limit else text[:limit] + f"...(truncated,{len(text)} chars)"
+
 def generate_ai_json_with_retry(model, prompt: str, expected_keys: list, debug_enabled: bool = False, max_retries: int = 3):
     if not model or not prompt:
         return {k: "未提取" for k in expected_keys}
@@ -95,7 +103,6 @@ def generate_ai_json_with_retry(model, prompt: str, expected_keys: list, debug_e
     # 包装最终报错信息，确保带上关键字给外层雷达识别
     out = {k: "解析报错" for k in expected_keys}
     if expected_keys:
-        # 把大模型真实的报错信息（如 400/Quota 等）写进第一个格子里，方便我们排错
         out[expected_keys[0]] = f"解析报错: {last_err[:100]}" 
     return out
 
