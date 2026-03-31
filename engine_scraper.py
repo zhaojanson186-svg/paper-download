@@ -14,7 +14,6 @@ Entrez.email = ENTREZ_EMAIL
 _last_patent_fetch_debug = None
 
 def fetch_pmc_metadata(pmcid):
-    """抓取文献的标题和摘要用于前端展示与 AI 分析"""
     try:
         url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmcid}&retmode=xml"
         res = requests_get_with_retry(url, timeout=15)
@@ -28,7 +27,6 @@ def fetch_pmc_metadata(pmcid):
         return f"PMC{pmcid}", "摘要获取失败"
 
 def download_pdf(pmcid, query):
-    """【Plan A】尝试从 PMC 官方 OA 接口下载原始 PDF"""
     safe_query = sanitize_filename(query)
     file_name = f"{safe_query}_PMC{pmcid}.pdf"
     file_path = os.path.join(DOWNLOAD_DIR, file_name)
@@ -57,7 +55,6 @@ def download_pdf(pmcid, query):
         return "网络异常", None, None
 
 def download_fulltext_txt(pmcid, query, download_dir):
-    """当没有 PDF 时，直接抓取 NCBI XML 网页正文并洗净保存为 TXT，上传至网盘"""
     safe_query = sanitize_filename(query)
     file_name = f"{safe_query}_PMC{pmcid}_网页全文.txt"
     file_path = os.path.join(download_dir, file_name)
@@ -198,7 +195,6 @@ def search_google_patents(query, max_results=30):
     """【专利模式1：全球广度】调用 Google Patents 底层 XHR 接口"""
     global _last_patent_fetch_debug
     encoded_q = urllib.parse.quote(query)
-    # 直连 Google Patents XHR 接口，绕过前端验证
     url = f"https://patents.google.com/xhr/query?url=q%3D{encoded_q}%26num%3D{max_results}"
 
     _last_patent_fetch_debug = {"query": query, "url": url}
@@ -215,7 +211,6 @@ def search_google_patents(query, max_results=30):
             return []
 
         data = res.json()
-        # 解析 Google 复杂的层级结构
         results = data.get("results", {}).get("cluster", [{}])[0].get("result", [])
         
         parsed_patents = []
