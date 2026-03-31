@@ -61,7 +61,6 @@ with st.sidebar:
     st.markdown("---")
     debug_mode = st.checkbox("🧪 显示 AI 解析调试信息", value=False, key="debug_ai_parse")
     
-    # 动态显示账本记录数
     record_count_placeholder = st.empty()
     record_count_placeholder.write(f"📖 云端总账本记录数: **{len(st.session_state['cloud_history'])}** 条")
     
@@ -137,22 +136,21 @@ with tab1:
                         title, abstract = fetch_pmc_metadata(pmcid)
                         
                         # ========================================================
-                        # 【升级版】AI 无缝换模型装甲 (文献区) - 全字典扫描
+                        # 终极版拦截网：加入 400 和 解析报错
                         # ========================================================
                         ai_insights = {}
                         while current_model_idx < len(model_chain):
                             success = False
                             for attempt in range(3):
                                 ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
-                                
-                                # 将整个字典强行转为小写字符串，地毯式搜索报错关键字
                                 error_check = str(ai_insights).lower()
                                 
-                                if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500"]):
+                                # 将 400 和 error 也加入黑名单
+                                if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
                                     success = True
                                     break 
                                     
-                                st.warning(f"⚠️ [{model_chain[current_model_idx]}] 触发限流，冷静 10 秒... (第 {attempt+1}/3 次重试)")
+                                st.warning(f"⚠️ [{model_chain[current_model_idx]}] 触发报错/限流，冷静 10 秒... (第 {attempt+1}/3 次重试)")
                                 time.sleep(10.0)
                                 
                             if success:
@@ -161,11 +159,11 @@ with tab1:
                                 current_model_idx += 1
                                 if current_model_idx < len(model_chain):
                                     new_model = model_chain[current_model_idx]
-                                    st.error(f"🔴 当前模型额度耗尽！自动无缝切换至备用模型: {new_model} 🚀")
+                                    st.error(f"🔴 当前模型异常或耗尽！自动无缝切换至备用模型: {new_model} 🚀")
                                     ai_model = init_ai_model(gemini_api_key, new_model)
                                 else:
-                                    st.error("❌ 所有备用模型的每日免费额度均已耗尽！请明天再试。")
-                                    ai_insights = {"靶点组合": "解析失败: 额度耗尽", "AI核心结论": "解析失败: 额度耗尽", "实验模型": "无"}
+                                    st.error("❌ 所有备用模型均无法解析！请检查 API 密钥或明天再试。")
+                                    ai_insights = {"靶点组合": "解析彻底失败", "AI核心结论": "解析彻底失败", "实验模型": "无"}
                                     break
                         # ========================================================
                         
@@ -244,21 +242,20 @@ with tab2:
                                 ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
                                 
                                 # ========================================================
-                                # 【升级版】AI 无缝换模型装甲 (专利区) - 全字典扫描
+                                # 终极版拦截网 (专利区)
                                 # ========================================================
                                 ai_insights = {}
                                 while current_model_idx < len(model_chain):
                                     success = False
                                     for attempt in range(3):
                                         ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
-                                        
                                         error_check = str(ai_insights).lower()
                                         
-                                        if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500"]):
+                                        if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
                                             success = True
                                             break
                                             
-                                        st.warning(f"⚠️ [{model_chain[current_model_idx]}] 触发限流，冷静 10 秒... (第 {attempt+1}/3 次重试)")
+                                        st.warning(f"⚠️ [{model_chain[current_model_idx]}] 触发报错/限流，冷静 10 秒... (第 {attempt+1}/3 次重试)")
                                         time.sleep(10.0)
                                         
                                     if success:
@@ -267,11 +264,11 @@ with tab2:
                                         current_model_idx += 1
                                         if current_model_idx < len(model_chain):
                                             new_model = model_chain[current_model_idx]
-                                            st.error(f"🔴 当前模型额度耗尽！自动无缝切换至备用模型: {new_model} 🚀")
+                                            st.error(f"🔴 当前模型异常或耗尽！自动无缝切换至备用模型: {new_model} 🚀")
                                             ai_model = init_ai_model(gemini_api_key, new_model)
                                         else:
-                                            st.error("❌ 所有备用模型的每日免费额度均已耗尽！请明天再试。")
-                                            ai_insights = {"靶点组合": "解析失败: 额度耗尽", "AI一句话总结": "解析失败: 额度耗尽", "抗体构型": "无"}
+                                            st.error("❌ 所有备用模型均无法解析！请检查 API 密钥或明天再试。")
+                                            ai_insights = {"靶点组合": "解析彻底失败", "AI一句话总结": "解析彻底失败", "抗体构型": "无"}
                                             break
                                 # ========================================================
 
