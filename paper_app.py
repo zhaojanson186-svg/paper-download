@@ -23,6 +23,9 @@ if 'history_file_id' not in st.session_state:
     st.session_state['history_file_id'] = None
 if 'is_history_loaded' not in st.session_state:
     st.session_state['is_history_loaded'] = False
+# 新增：缓存全局模型列表，防止每次点击都去拉取拖慢速度
+if 'all_available_models' not in st.session_state:
+    st.session_state['all_available_models'] = []
 
 with st.sidebar:
     st.header("⚙️ 全局配置")
@@ -45,8 +48,9 @@ with st.sidebar:
 
     if st.button("🔄 刷新可用模型列表", type="secondary"):
         with st.spinner("正在拉取可用模型列表..."):
-            models = list_available_gemini_models(gemini_api_key, max_items=50)
+            models = list_available_gemini_models(gemini_api_key, max_items=100)
             if models:
+                st.session_state['all_available_models'] = models
                 st.success(f"获取到 {len(models)} 个模型。")
                 st.expander("可用模型列表").code("\n".join(models))
             else:
@@ -78,9 +82,23 @@ with st.sidebar:
         st.rerun()
 
 # ---------------------------------------------------------
-# 构建备用模型弹夹 (Model Chain)
+# 构建备用模型弹夹 (Model Chain) - 无限火力版
 # ---------------------------------------------------------
-fallback_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-1.5-flash"]
+# 1. 自动尝试拉取账号下所有模型
+if not st.session_state['all_available_models'] and gemini_api_key:
+    raw_models = list_available_gemini_models(gemini_api_key, max_items=100)
+    if raw_models:
+        st.session_state['all_available_models'] = raw_models
+
+# 2. 智能清洗：过滤掉明确不能做文本生成的模型（如语音、纯视觉、向量模型）
+if st.session_state['all_available_models']:
+    fallback_models = [m for m in st.session_state['all_available_models'] 
+                       if "tts" not in m and "embedding" not in m and "vision" not in m and "aqa" not in m]
+else:
+    # 兜底硬编码
+    fallback_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-pro"]
+
+# 3. 组装超级弹夹：保证你填写的初始模型永远是第一发子弹
 model_chain = [gemini_model_name] + [m for m in fallback_models if m != gemini_model_name]
 
 
@@ -136,26 +154,24 @@ with tab1:
                         title, abstract = fetch_pmc_metadata(pmcid)
                         
                         # ========================================================
-                        # 【极速版】AI 无缝换弹：一击不中，立刻换枪！
+                        # 加特林机枪换弹模式
                         # ========================================================
                         ai_insights = {}
                         while current_model_idx < len(model_chain):
                             ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
                             error_check = str(ai_insights).lower()
                             
-                            # 没报错就直接跳出，正常录入表格
                             if not any(kw in error_check for kw in ["429", "quota", "resourceexhausted", "too many requests", "503", "500", "400", "error", "解析报错"]):
                                 break 
                                 
-                            # 一旦报错，无需等待，立刻抛弃当前模型，切换下一个
                             current_model_idx += 1
                             if current_model_idx < len(model_chain):
                                 new_model = model_chain[current_model_idx]
-                                st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} 🚀")
+                                st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} ({current_model_idx}/{len(model_chain)})🚀")
                                 ai_model = init_ai_model(gemini_api_key, new_model)
-                                time.sleep(0.5) # 给新模型留0.5秒切换时间
+                                time.sleep(0.5)
                             else:
-                                st.error("❌ 弹夹打空！所有备用模型均无法解析。")
+                                st.error("❌ 弹尽粮绝！几十个备用模型全部被打空，说明该项目的 API 额度已遭彻底封锁。")
                                 ai_insights = {"靶点组合": "解析彻底失败", "AI核心结论": "解析彻底失败", "实验模型": "无"}
                                 break
                         # ========================================================
@@ -234,9 +250,6 @@ with tab2:
                             for idx, pt in enumerate(new_patents):
                                 ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
                                 
-                                # ========================================================
-                                # 【极速版】AI 无缝换弹 (专利区)
-                                # ========================================================
                                 ai_insights = {}
                                 while current_model_idx < len(model_chain):
                                     ai_insights = analyze_patent_with_ai(ai_model, pt['核心摘要'], debug_mode)
@@ -248,14 +261,13 @@ with tab2:
                                     current_model_idx += 1
                                     if current_model_idx < len(model_chain):
                                         new_model = model_chain[current_model_idx]
-                                        st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} 🚀")
+                                        st.warning(f"⚠️ [{model_chain[current_model_idx-1]}] 卡壳，立刻无缝切枪至: {new_model} ({current_model_idx}/{len(model_chain)})🚀")
                                         ai_model = init_ai_model(gemini_api_key, new_model)
                                         time.sleep(0.5)
                                     else:
-                                        st.error("❌ 弹夹打空！所有备用模型均无法解析。")
+                                        st.error("❌ 弹尽粮绝！几十个备用模型全部被打空，说明该项目的 API 额度已遭彻底封锁。")
                                         ai_insights = {"靶点组合": "解析彻底失败", "AI一句话总结": "解析彻底失败", "抗体构型": "无"}
                                         break
-                                # ========================================================
 
                                 pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
                                 pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
