@@ -110,6 +110,9 @@ with tab1:
                 else:
                     progress_bar = st.progress(0)
                     status_text = st.empty()
+                    
+                    # --- 新增：实时结果显示容器 ---
+                    result_container = st.empty() 
                     paper_report_data = []
                     
                     for i, pmcid in enumerate(new_pmc_ids):
@@ -134,7 +137,20 @@ with tab1:
                                 pdf_uploaded = f"❌ 彻底失败: {txt_status}"
 
                         title, abstract = fetch_pmc_metadata(pmcid)
-                        ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
+                        
+                        # --- 新增：大模型 429 限流自动重试机制 (文献版) ---
+                        max_retries = 3
+                        ai_insights = {}
+                        for attempt in range(max_retries):
+                            ai_insights = analyze_paper_with_ai(ai_model, abstract, debug_mode)
+                            
+                            error_check_str = str(ai_insights.get("靶点组合", "")) + str(ai_insights.get("AI核心结论", ""))
+                            if "429" not in error_check_str and "quota" not in error_check_str.lower():
+                                break # 没报错就跳出循环
+                                
+                            st.warning(f"⚠️ 触发 Gemini 限流红线，进入冷静期 10 秒... (第 {attempt+1}/{max_retries} 次重试)")
+                            time.sleep(10.0)
+                        # ----------------------------------------------------
                         
                         paper_report_data.append({
                             "文献编号": f"PMC{pmcid}",
@@ -146,16 +162,18 @@ with tab1:
                             "官方直达链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
                         })
                         
+                        # --- 新增：每处理完一篇，就立刻刷新网页上的表格 ---
+                        result_container.dataframe(pd.DataFrame(paper_report_data), column_config={"官方直达链接": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
+                        
                         history[f"PMC_{pmcid}"] = f"✅ 已精读 ({pdf_uploaded})"
                         st.session_state['cloud_history'] = history
                         st.session_state['history_file_id'] = update_cloud_history(
                             drive_service, gdrive_folder_id, history, file_id=st.session_state['history_file_id']
                         )
-                        time.sleep(4.5) 
+                        time.sleep(1.5) # 稍微留点喘息时间
                         progress_bar.progress((i + 1) / len(new_pmc_ids))
                         
                     df_papers = pd.DataFrame(paper_report_data)
-                    st.dataframe(df_papers, column_config={"官方直达链接": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
                     csv_name = f"{sanitize_filename(query_paper)}_Paper_AI_Report_{time.strftime('%m%d_%H%M')}.csv"
                     csv_path = os.path.join(DOWNLOAD_DIR, csv_name)
                     df_papers.to_csv(csv_path, index=False, encoding="utf-8-sig")
