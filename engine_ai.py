@@ -35,7 +35,6 @@ def extract_json_object(text: str):
     if not text:
         return None
     
-    # 强制执行底层规则：最基础的 replace
     clean_text = text.replace("```json", "").replace("```", "").strip()
 
     start = clean_text.find("{")
@@ -72,13 +71,20 @@ def generate_ai_json_with_retry(model, prompt: str, expected_keys: list, debug_e
 
     for attempt in range(max_retries):
         try:
+            # ==========================================
+            # 核心修复区：完美兼容所有新老 Gemini 模型的参数格式
+            # ==========================================
             res_text = model.generate_content(
                 prompt,
-                # 强制执行底层规则：豁免安全审查防医疗词汇误伤
-                safety_settings=[
-                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-                ],
+                generation_config={"temperature": 0.1}, # 降低随机性，保证 JSON 格式极度稳定
+                safety_settings={
+                    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+                    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE"
+                }
             ).text
+            
             candidate = extract_json_object(res_text)
             data, parse_error = None, ""
             
@@ -99,6 +105,7 @@ def generate_ai_json_with_retry(model, prompt: str, expected_keys: list, debug_e
 
         except Exception as e:
             last_err = str(e).replace("\n", " ")
+            # 兼容检测：如果是 429 限流，直接原地等待重试；其他严重错误（如400/503）直接抛出给外层换弹夹
             if "429" in last_err and attempt < max_retries - 1:
                 time.sleep(2 ** attempt + 1)
                 continue
