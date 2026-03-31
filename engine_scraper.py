@@ -179,18 +179,33 @@ def search_europe_pmc_patents(query, max_results=30):
 
 def search_google_patents(query, max_results=30):
     global _last_patent_fetch_debug
-    encoded_q = urllib.parse.quote(query)
+    # 使用 quote_plus 把空格变成 +，这更符合 Google 引擎的习惯
+    encoded_q = urllib.parse.quote_plus(query)
     url = f"https://patents.google.com/xhr/query?url=q%3D{encoded_q}%26num%3D{max_results}"
+    
     _last_patent_fetch_debug = {"query": query, "url": url}
+    
+    # 【核心修复】：穿上逼真的浏览器伪装服
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://patents.google.com/",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+    
     try:
-        res = requests_get_with_retry(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        res = requests_get_with_retry(url, headers=headers, timeout=20, max_retries=3)
         _last_patent_fetch_debug["status_code"] = getattr(res, "status_code", None)
+        _last_patent_fetch_debug["response_preview"] = safe_truncate(getattr(res, "text", ""), 300)
+        
         if res.status_code != 200: return []
+        
         results = res.json().get("results", {}).get("cluster", [{}])[0].get("result", [])
         parsed = []
         for p in results:
             patent = p.get("patent", {})
             p_num = patent.get("publication_number")
+            if not p_num: continue
             assignee = patent.get("assignee", "未公开")
             if isinstance(assignee, list): assignee = ", ".join(assignee)
             parsed.append({
@@ -200,7 +215,10 @@ def search_google_patents(query, max_results=30):
                 "直达阅读链接": f"https://patents.google.com/patent/{p_num}/en"
             })
         return parsed
-    except Exception: return []
+    except Exception as e:
+        import traceback
+        _last_patent_fetch_debug["exception"] = traceback.format_exc()
+        return []
 
 def get_last_patent_fetch_debug():
     global _last_patent_fetch_debug
