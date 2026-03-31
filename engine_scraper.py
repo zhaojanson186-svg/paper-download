@@ -56,31 +56,24 @@ def download_pdf(pmcid, query):
     except Exception:
         return "网络异常", None, None
 
-# ==========================================
-# 新增：【Plan B】网页全文抓取引擎
-# ==========================================
 def download_fulltext_txt(pmcid, query, download_dir):
     """当没有 PDF 时，直接抓取 NCBI XML 网页正文并洗净保存为 TXT，上传至网盘"""
     safe_query = sanitize_filename(query)
     file_name = f"{safe_query}_PMC{pmcid}_网页全文.txt"
     file_path = os.path.join(download_dir, file_name)
     
-    # 获取 XML 格式的全文本数据
     url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmcid}&retmode=xml"
     try:
         res = requests_get_with_retry(url, timeout=20)
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             
-            # 1. 提取标题
             title_node = root.find(".//article-title")
             title = "".join(title_node.itertext()) if title_node is not None else f"PMC{pmcid}"
             
-            # 2. 提取摘要
             abstract_node = root.find(".//abstract")
             abstract = "".join(abstract_node.itertext()) if abstract_node is not None else "无摘要内容。"
             
-            # 3. 提取正文（递归提取所有段落文字）
             body_node = root.find(".//body")
             body_text = []
             if body_node is not None:
@@ -92,7 +85,6 @@ def download_fulltext_txt(pmcid, query, download_dir):
             if not body_text:
                 return "网页正文为空", None, None
                 
-            # 结构化组装文本
             full_content = f"【文献标题】: {title}\n"
             full_content += "="*50 + "\n"
             full_content += f"【核心摘要】:\n{abstract}\n\n"
@@ -107,8 +99,44 @@ def download_fulltext_txt(pmcid, query, download_dir):
     except Exception as e:
         return f"抓取报错: {str(e)[:20]}", None, None
 
+def download_patent_fulltext_txt(patent_id, query, download_dir):
+    """【专利专用】尝试抓取欧洲专利局(通过EuropePMC)的专利全文并保存为TXT"""
+    safe_query = sanitize_filename(query)
+    clean_id = patent_id.replace("PAT", "")
+    file_name = f"{safe_query}_Patent_{clean_id}_专利全文.txt"
+    file_path = os.path.join(download_dir, file_name)
+    
+    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{clean_id}/fullTextXML"
+    headers = {"User-Agent": "Mozilla/5.0 (Streamlit Antibody Research App)"}
+    try:
+        res = requests_get_with_retry(url, headers=headers, timeout=20)
+        if res.status_code == 200 and "<" in res.text:
+            root = ET.fromstring(res.content)
+            title_node = root.find(".//title")
+            title = "".join(title_node.itertext()) if title_node is not None else f"Patent {clean_id}"
+            
+            body_text = []
+            for text_node in root.findall(".//*"):
+                if text_node.text and text_node.text.strip() and len(text_node.text.strip()) > 15: 
+                    body_text.append(text_node.text.strip())
+            
+            if not body_text:
+                return "专利无全文数据返回", None, None
+                
+            full_content = f"【专利标题】: {title}\n"
+            full_content += "="*50 + "\n"
+            full_content += "【专利说明书/权利要求全文提取】:\n\n" + "\n\n".join(body_text[:500])
+            
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(full_content)
+            
+            return "抓取成功", file_path, file_name
+        else:
+            return "数据库无此专利全文", None, None
+    except Exception as e:
+        return f"解析报错: {str(e)[:20]}", None, None
+
 def search_pmc_oa(query, max_results=5):
-    """搜索 PMC 中的开源文献 ID 列表"""
     oa_query = f"({query}) AND open access[filter]"
     try:
         handle = Entrez.esearch(db="pmc", term=oa_query, retmax=max_results, sort="date")
@@ -119,7 +147,7 @@ def search_pmc_oa(query, max_results=5):
         return []
 
 def search_europe_pmc_patents(query, max_results=30):
-    """调用欧洲 Europe PMC 官方接口提取生命科学专利"""
+    """【专利模式2：深度穿透】调用欧洲 Europe PMC 官方接口"""
     global _last_patent_fetch_debug
     epmc_query = f'({query}) AND SRC:PAT'
     encoded_q = urllib.parse.quote(epmc_query)
@@ -127,14 +155,13 @@ def search_europe_pmc_patents(query, max_results=30):
 
     _last_patent_fetch_debug = {"query": query, "url": url}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Streamlit Antibody Research App)",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
 
     try:
         res = requests_get_with_retry(url, headers=headers, timeout=20, max_retries=3)
         _last_patent_fetch_debug["status_code"] = getattr(res, "status_code", None)
-        _last_patent_fetch_debug["response_preview"] = safe_truncate(getattr(res, "text", ""), 300)
 
         if res.status_code != 200:
             return []
@@ -167,7 +194,58 @@ def search_europe_pmc_patents(query, max_results=30):
         _last_patent_fetch_debug["exception"] = traceback.format_exc()
         return []
 
+def search_google_patents(query, max_results=30):
+    """【专利模式1：全球广度】调用 Google Patents 底层 XHR 接口"""
+    global _last_patent_fetch_debug
+    encoded_q = urllib.parse.quote(query)
+    # 直连 Google Patents XHR 接口，绕过前端验证
+    url = f"https://patents.google.com/xhr/query?url=q%3D{encoded_q}%26num%3D{max_results}"
+
+    _last_patent_fetch_debug = {"query": query, "url": url}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json"
+    }
+
+    try:
+        res = requests_get_with_retry(url, headers=headers, timeout=20, max_retries=3)
+        _last_patent_fetch_debug["status_code"] = getattr(res, "status_code", None)
+
+        if res.status_code != 200:
+            return []
+
+        data = res.json()
+        # 解析 Google 复杂的层级结构
+        results = data.get("results", {}).get("cluster", [{}])[0].get("result", [])
+        
+        parsed_patents = []
+        for p in results:
+            patent = p.get("patent", {})
+            p_num = patent.get("publication_number", "无编号")
+            title = patent.get("title", "未公开")
+            snippet = patent.get("snippet", "无摘要").replace("\n", " ")
+            clean_abstract = re.sub(r"<[^>]+>", "", snippet)
+            
+            assignee = patent.get("assignee", "未公开")
+            if isinstance(assignee, list):
+                assignee = ", ".join(assignee)
+                
+            priority_date = patent.get("priority_date", "未知")
+
+            parsed_patents.append({
+                "全球公开号": p_num,
+                "优先权/申请日": priority_date,
+                "申请公司 / 拥有者": assignee,
+                "专利名称": title,
+                "核心摘要": clean_abstract[:1500],
+                "直达阅读链接": f"https://patents.google.com/patent/{p_num}/en"
+            })
+        return parsed_patents
+    except Exception as e:
+        import traceback
+        _last_patent_fetch_debug["exception"] = traceback.format_exc()
+        return []
+
 def get_last_patent_fetch_debug():
-    """获取最后一次专利抓取的调试信息"""
     global _last_patent_fetch_debug
     return _last_patent_fetch_debug or {}
