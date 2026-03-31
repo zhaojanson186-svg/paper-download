@@ -14,6 +14,7 @@ Entrez.email = ENTREZ_EMAIL
 _last_patent_fetch_debug = None
 
 def fetch_pmc_metadata(pmcid):
+    """抓取文献的标题和摘要"""
     try:
         url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmcid}&retmode=xml"
         res = requests_get_with_retry(url, timeout=15)
@@ -27,6 +28,7 @@ def fetch_pmc_metadata(pmcid):
         return f"PMC{pmcid}", "摘要获取失败"
 
 def download_pdf(pmcid, query):
+    """尝试下载 PDF"""
     safe_query = sanitize_filename(query)
     file_name = f"{safe_query}_PMC{pmcid}.pdf"
     file_path = os.path.join(DOWNLOAD_DIR, file_name)
@@ -55,83 +57,92 @@ def download_pdf(pmcid, query):
         return "网络异常", None, None
 
 def download_fulltext_txt(pmcid, query, download_dir):
+    """文献网页全文提取"""
     safe_query = sanitize_filename(query)
     file_name = f"{safe_query}_PMC{pmcid}_网页全文.txt"
     file_path = os.path.join(download_dir, file_name)
-    
     url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmcid}&retmode=xml"
     try:
         res = requests_get_with_retry(url, timeout=20)
         if res.status_code == 200:
             root = ET.fromstring(res.content)
-            
             title_node = root.find(".//article-title")
             title = "".join(title_node.itertext()) if title_node is not None else f"PMC{pmcid}"
-            
             abstract_node = root.find(".//abstract")
             abstract = "".join(abstract_node.itertext()) if abstract_node is not None else "无摘要内容。"
-            
             body_node = root.find(".//body")
             body_text = []
             if body_node is not None:
                 for p in body_node.findall(".//p"):
                     text_chunk = "".join(p.itertext()).strip()
-                    if text_chunk:
-                        body_text.append(text_chunk)
-            
-            if not body_text:
-                return "网页正文为空", None, None
-                
-            full_content = f"【文献标题】: {title}\n"
-            full_content += "="*50 + "\n"
-            full_content += f"【核心摘要】:\n{abstract}\n\n"
-            full_content += "="*50 + "\n"
-            full_content += "【网页正文全文内容】:\n\n" + "\n\n".join(body_text)
-            
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(full_content)
-            
+                    if text_chunk: body_text.append(text_chunk)
+            if not body_text: return "网页正文为空", None, None
+            full_content = f"【文献标题】: {title}\n" + "="*50 + f"\n【摘要】:\n{abstract}\n\n【正文】:\n" + "\n\n".join(body_text)
+            with open(file_path, "w", encoding="utf-8") as f: f.write(full_content)
             return "备用抓取成功", file_path, file_name
         return f"HTTP {res.status_code}", None, None
-    except Exception as e:
-        return f"抓取报错: {str(e)[:20]}", None, None
+    except Exception as e: return f"抓取报错: {str(e)[:20]}", None, None
 
 def download_patent_fulltext_txt(patent_id, query, download_dir):
-    """【专利专用】尝试抓取欧洲专利局(通过EuropePMC)的专利全文并保存为TXT"""
+    """【欧洲模式】提取专利全文"""
     safe_query = sanitize_filename(query)
     clean_id = patent_id.replace("PAT", "")
     file_name = f"{safe_query}_Patent_{clean_id}_专利全文.txt"
     file_path = os.path.join(download_dir, file_name)
-    
     url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{clean_id}/fullTextXML"
-    headers = {"User-Agent": "Mozilla/5.0 (Streamlit Antibody Research App)"}
     try:
-        res = requests_get_with_retry(url, headers=headers, timeout=20)
+        res = requests_get_with_retry(url, timeout=20)
         if res.status_code == 200 and "<" in res.text:
             root = ET.fromstring(res.content)
-            title_node = root.find(".//title")
-            title = "".join(title_node.itertext()) if title_node is not None else f"Patent {clean_id}"
-            
             body_text = []
             for text_node in root.findall(".//*"):
-                if text_node.text and text_node.text.strip() and len(text_node.text.strip()) > 15: 
-                    body_text.append(text_node.text.strip())
+                if text_node.text and len(text_node.text.strip()) > 15: body_text.append(text_node.text.strip())
+            if not body_text: return "无全文数据", None, None
+            full_content = f"【专利】: {patent_id}\n" + "="*50 + "\n" + "\n\n".join(body_text[:500])
+            with open(file_path, "w", encoding="utf-8") as f: f.write(full_content)
+            return "抓取成功", file_path, file_name
+        return "数据库无全文", None, None
+    except Exception as e: return f"解析报错: {str(e)[:20]}", None, None
+
+# ==========================================
+# 新增：【谷歌模式】隐藏接口全文提取引擎
+# ==========================================
+def download_google_patent_fulltext_txt(patent_id, query, download_dir):
+    """【谷歌专用】利用隐藏 XHR 接口提取全球专利正文说明书及权利要求书"""
+    safe_query = sanitize_filename(query)
+    file_name = f"{safe_query}_GooglePatent_{patent_id}_全文.txt"
+    file_path = os.path.join(download_dir, file_name)
+    
+    # 构造 Google Patents 内部数据接口 URL
+    url = f"https://patents.google.com/xhr/query?url=patent/{patent_id}/en"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
+    try:
+        res = requests_get_with_retry(url, headers=headers, timeout=20)
+        if res.status_code == 200:
+            data = res.json()
+            p_data = data.get("results", {}).get("patent", {})
             
-            if not body_text:
-                return "专利无全文数据返回", None, None
-                
-            full_content = f"【专利标题】: {title}\n"
+            # 提取说明书 (Description) 和 权利要求 (Claims)
+            description = p_data.get("description", "无说明书数据")
+            claims = p_data.get("claims", "无权利要求数据")
+            
+            # 清洗 HTML 标签
+            clean_desc = re.sub(r"<[^>]+>", "\n", description)
+            clean_claims = re.sub(r"<[^>]+>", "\n", claims)
+            
+            full_content = f"【专利号】: {patent_id}\n"
             full_content += "="*50 + "\n"
-            full_content += "【专利说明书/权利要求全文提取】:\n\n" + "\n\n".join(body_text[:500])
+            full_content += f"【权利要求书 (Claims)】:\n{clean_claims}\n\n"
+            full_content += "="*50 + "\n"
+            full_content += f"【详细说明书 (Description)】:\n{clean_desc[:15000]}" # 限制长度防止文件过大
             
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(full_content)
-            
             return "抓取成功", file_path, file_name
-        else:
-            return "数据库无此专利全文", None, None
+        return f"HTTP {res.status_code}", None, None
     except Exception as e:
-        return f"解析报错: {str(e)[:20]}", None, None
+        return f"谷歌提取失败: {str(e)[:20]}", None, None
 
 def search_pmc_oa(query, max_results=5):
     oa_query = f"({query}) AND open access[filter]"
@@ -140,106 +151,56 @@ def search_pmc_oa(query, max_results=5):
         record = Entrez.read(handle)
         handle.close()
         return record["IdList"] 
-    except Exception:
-        return []
+    except Exception: return []
 
 def search_europe_pmc_patents(query, max_results=30):
-    """【专利模式2：深度穿透】调用欧洲 Europe PMC 官方接口"""
     global _last_patent_fetch_debug
     epmc_query = f'({query}) AND SRC:PAT'
     encoded_q = urllib.parse.quote(epmc_query)
     url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={encoded_q}&resultType=core&format=json&pageSize={max_results}"
-
     _last_patent_fetch_debug = {"query": query, "url": url}
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
-    }
-
     try:
-        res = requests_get_with_retry(url, headers=headers, timeout=20, max_retries=3)
+        res = requests_get_with_retry(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         _last_patent_fetch_debug["status_code"] = getattr(res, "status_code", None)
-
-        if res.status_code != 200:
-            return []
-
-        data = res.json()
-        results = data.get("resultList", {}).get("result", [])
-        
-        parsed_patents = []
+        if res.status_code != 200: return []
+        results = res.json().get("resultList", {}).get("result", [])
+        parsed = []
         for p in results:
-            p_num = p.get("id", "无编号")
-            org_str = p.get("authorString", "未公开")
             abstract = p.get("abstractText", "无摘要").replace("\n", " ")
-            clean_abstract = re.sub(r"<[^>]+>", "", abstract)
-            
-            if clean_abstract == "无摘要" or len(clean_abstract) < 20:
-                continue
-
-            parsed_patents.append({
-                "全球公开号": p_num,
-                "优先权/申请日": p.get("firstPublicationDate", p.get("pubYear", "未知")),
-                "申请公司 / 拥有者": org_str,
-                "专利名称": p.get("title", "未公开"),
-                "核心摘要": clean_abstract[:1500],
-                "直达阅读链接": f"https://europepmc.org/article/PAT/{p_num}"
+            clean_abs = re.sub(r"<[^>]+>", "", abstract)
+            if len(clean_abs) < 20: continue
+            parsed.append({
+                "全球公开号": p.get("id"), "优先权/申请日": p.get("firstPublicationDate", "未知"),
+                "申请公司 / 拥有者": p.get("authorString", "未公开"), "专利名称": p.get("title", "未公开"),
+                "核心摘要": clean_abs[:1500], "直达阅读链接": f"https://europepmc.org/article/PAT/{p.get('id')}"
             })
-            
-        return parsed_patents
-    except Exception as e:
-        import traceback
-        _last_patent_fetch_debug["exception"] = traceback.format_exc()
-        return []
+        return parsed
+    except Exception: return []
 
 def search_google_patents(query, max_results=30):
-    """【专利模式1：全球广度】调用 Google Patents 底层 XHR 接口"""
     global _last_patent_fetch_debug
     encoded_q = urllib.parse.quote(query)
     url = f"https://patents.google.com/xhr/query?url=q%3D{encoded_q}%26num%3D{max_results}"
-
     _last_patent_fetch_debug = {"query": query, "url": url}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json"
-    }
-
     try:
-        res = requests_get_with_retry(url, headers=headers, timeout=20, max_retries=3)
+        res = requests_get_with_retry(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         _last_patent_fetch_debug["status_code"] = getattr(res, "status_code", None)
-
-        if res.status_code != 200:
-            return []
-
-        data = res.json()
-        results = data.get("results", {}).get("cluster", [{}])[0].get("result", [])
-        
-        parsed_patents = []
+        if res.status_code != 200: return []
+        results = res.json().get("results", {}).get("cluster", [{}])[0].get("result", [])
+        parsed = []
         for p in results:
             patent = p.get("patent", {})
-            p_num = patent.get("publication_number", "无编号")
-            title = patent.get("title", "未公开")
-            snippet = patent.get("snippet", "无摘要").replace("\n", " ")
-            clean_abstract = re.sub(r"<[^>]+>", "", snippet)
-            
+            p_num = patent.get("publication_number")
             assignee = patent.get("assignee", "未公开")
-            if isinstance(assignee, list):
-                assignee = ", ".join(assignee)
-                
-            priority_date = patent.get("priority_date", "未知")
-
-            parsed_patents.append({
-                "全球公开号": p_num,
-                "优先权/申请日": priority_date,
-                "申请公司 / 拥有者": assignee,
-                "专利名称": title,
-                "核心摘要": clean_abstract[:1500],
+            if isinstance(assignee, list): assignee = ", ".join(assignee)
+            parsed.append({
+                "全球公开号": p_num, "优先权/申请日": patent.get("priority_date", "未知"),
+                "申请公司 / 拥有者": assignee, "专利名称": patent.get("title", "未公开"),
+                "核心摘要": re.sub(r"<[^>]+>", "", patent.get("snippet", "无摘要"))[:1500],
                 "直达阅读链接": f"https://patents.google.com/patent/{p_num}/en"
             })
-        return parsed_patents
-    except Exception as e:
-        import traceback
-        _last_patent_fetch_debug["exception"] = traceback.format_exc()
-        return []
+        return parsed
+    except Exception: return []
 
 def get_last_patent_fetch_debug():
     global _last_patent_fetch_debug
