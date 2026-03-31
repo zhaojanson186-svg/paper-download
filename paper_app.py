@@ -198,7 +198,7 @@ with tab2:
                             ai_progress = st.progress(0)
                             ai_status = st.empty()
                             
-                           for idx, pt in enumerate(new_patents):
+                            for idx, pt in enumerate(new_patents):
                                 ai_status.text(f"🤖 AI 提纯第 {idx+1}/{len(new_patents)} 项: {pt['全球公开号']} ...")
                                 
                                 # ================= 新增：大模型 429 限流自动重试机制 =================
@@ -241,7 +241,6 @@ with tab2:
 
                                 history[f"PAT_{pt['全球公开号']}"] = f"✅ 已AI提纯 ({txt_uploaded})"
                                 
-                                # 正常的循环等待时间，我们稍微拉长一点点，更加稳妥
                                 time.sleep(6.5)
                                 ai_progress.progress((idx + 1) / len(new_patents))
                             
