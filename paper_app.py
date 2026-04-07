@@ -185,11 +185,12 @@ with tab1:
                         paper_report_data.append({
                             "文献编号": f"PMC{pmcid}",
                             "🎯核心靶点": ai_insights.get("靶点组合", ""),
+                            "🔬前沿机制/构型": ai_insights.get("前沿机制设计", ""), # 新增的透视眼
                             "🐁实验模型": ai_insights.get("实验模型", ""),
-                            "💡核心结论": ai_insights.get("AI核心结论", ""),
+                            "💡深度结论": ai_insights.get("AI深度结论", ""),
                             "原文状态": pdf_uploaded,
                             "文献标题": title,
-                            "官方链接": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
+                            "官方直达链接": f"https://europepmc.org/articles/PMC{pmcid}/"
                         })
                         
                         result_container.dataframe(pd.DataFrame(paper_report_data), column_config={"官方链接": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
@@ -289,8 +290,9 @@ with tab2:
                                 # ========================================================
 
                                 pt["🎯靶点组合"] = ai_insights.get("靶点组合", "未提取")
-                                pt["🧬抗体构型"] = ai_insights.get("抗体构型", "未提取")
-                                pt["💡商业一句话总结"] = ai_insights.get("AI一句话总结", "未提取")
+                                pt["🧬核心构型"] = ai_insights.get("核心抗体构型", "未提取")
+                                pt["🛡️特殊工程化保护"] = ai_insights.get("特殊工程化保护", "未提取") # 新增的专利壁垒探测器
+                                pt["💡商业总结"] = ai_insights.get("商业深度总结", "未提取")
 
                                 txt_uploaded = "未上传"
                                 
@@ -309,7 +311,9 @@ with tab2:
                                 pt["正文状态"] = txt_uploaded
                                 refined_patent_data.append(pt)
                                 
-                                cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬抗体构型", "💡商业一句话总结", "正文状态", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
+                               # 更新 columns 列表以包含新字段
+                            cols = ["全球公开号", "申请公司 / 拥有者", "🎯靶点组合", "🧬核心构型", "🛡️特殊工程化保护", "💡商业总结", "优先权/申请日", "专利名称", "核心摘要", "直达阅读链接"]
+                            df_patents = pd.DataFrame(new_patents)[cols]
                                 df_disp = pd.DataFrame(refined_patent_data)[cols]
                                 result_container_pat.dataframe(df_disp, column_config={"直达阅读链接": st.column_config.LinkColumn()}, use_container_width=True, hide_index=True)
 
